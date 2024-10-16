@@ -221,6 +221,29 @@ def plot_roc_auc(y_true, y_pred, num_classes):
     plt.show()
 
 
+def plot_training_evaluation_time(train_times, eval_times):
+    epochs = np.arange(1, len(train_times) + 1)
+    fig, ax1 = plt.subplots(figsize=(8, 6))
+
+    color = 'tab:blue'
+    ax1.set_xlabel('Epochs')
+    ax1.set_ylabel('Training Time (minutes)', color=color)
+    ax1.plot(epochs, train_times, label='Training Time', color=color)
+    ax1.tick_params(axis='y', labelcolor=color)
+
+    ax2 = ax1.twinx()
+    color = 'tab:red'
+    ax2.set_ylabel('Evaluation Time (seconds)', color=color)
+    ax2.plot(epochs, eval_times, label='Evaluation Time', color=color)
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    plt.title("Training and Evaluation Time per Epoch")
+    fig.tight_layout()  # to avoid overlap
+    plt.grid(True)
+    plt.savefig('transformer_train_evaluation_time.png')
+    plt.show()
+
+
 def main():
     root = "data/"
     hidden_dim = 128
@@ -244,6 +267,7 @@ def main():
 
     train_accuracies, val_accuracies = [], []
     train_losses, val_losses = [], []
+    train_times, eval_times = []  # To store times for each epoch
 
     print("Training Autoencoder...")
 
@@ -251,13 +275,17 @@ def main():
     autoencoder.to(device)
 
     for epoch in range(3):
-        start_time = time.time()
+        start_time = time.time()  # Start tracking time for training
         autoencoder_optimizer.zero_grad()
         encoded, decoded = autoencoder(X_train_tensor)  # Cần lấy cả 'decoded'
         # Tính toán MSELoss giữa đầu ra được giải mã và đầu vào
         train_loss = criterion(decoded, X_train_tensor)
         train_loss.backward()
         autoencoder_optimizer.step()
+
+        # Time for training in the current epoch
+        train_time = time.time() - start_time
+        train_times.append(train_time)  # Store the training time
 
         # Trích xuất đặc trưng từ Autoencoder sau epoch
         autoencoder.eval()
@@ -266,6 +294,7 @@ def main():
             X_test_encoded = autoencoder.encoder(X_test_tensor).numpy()
 
         # Bước 2: Huấn luyện XGBoost với đặc trưng đã trích xuất từ Autoencoder
+        start_eval_time = time.time()  # Start tracking time for evaluation
         xgb_model = xgb.XGBClassifier(
             n_estimators=100, use_label_encoder=False, eval_metric='mlogloss')
         xgb_model.fit(X_train_encoded, y_train)
@@ -273,6 +302,10 @@ def main():
         # Dự đoán cho train và test
         y_train_pred = xgb_model.predict(X_train_encoded)
         y_test_pred = xgb_model.predict(X_test_encoded)
+
+        # Time for evaluation in the current epoch
+        eval_time = time.time() - start_eval_time
+        eval_times.append(eval_time)  # Store the evaluation time
 
         # Tính toán độ chính xác và loss
         train_accuracy = accuracy_score(y_train, y_train_pred)
@@ -296,7 +329,7 @@ def main():
                   test_accuracy:.4f} | "
               f"Train Loss: {train_loss_value:.4f} | Test Loss: {
                   test_loss_value:.4f} | "
-              f"Training Time: {end_time - start_time:.2f} seconds")
+              f"Training Time: {train_time:.2f} seconds | Evaluation Time: {eval_time:.2f} seconds")
 
     # Sau khi hoàn thành toàn bộ quá trình huấn luyện, hiển thị báo cáo phân loại và các biểu đồ
     print("\nTraining completed. Generating reports and plots...")
@@ -311,6 +344,7 @@ def main():
     plot_confusion_matrix(y_test, y_test_pred, classes=np.unique(y_train))
     plot_roc_auc(y_test, y_test_pred, num_classes=len(np.unique(y_train)))
 
+    plot_training_evaluation_time(train_times, eval_times)
     print("All tasks completed.")
 
 

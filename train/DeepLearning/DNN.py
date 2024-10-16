@@ -225,7 +225,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Accuracy')
     plt.legend()
     plt.grid(True)
-    plt.savefig('MLP_accuracy.png')
+    plt.savefig('DNN_accuracy.png')
     plt.show()
 
     plt.figure(figsize=(8, 6))
@@ -236,7 +236,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid(True)
-    plt.savefig('MLP_loss.png')
+    plt.savefig('DNN_loss.png')
     plt.show()
 
 # Plot Training & Evaluation Time
@@ -261,7 +261,7 @@ def plot_training_evaluation_time(train_times, eval_times):
     plt.title("Training and Evaluation Time per Epoch")
     fig.tight_layout()  # to avoid overlap
     plt.grid(True)
-    plt.savefig('MLP_train_evaluation_time.png')
+    plt.savefig('DNN_train_evaluation_time.png')
     plt.show()
 
 # Plot Confusion Matrix
@@ -274,7 +274,7 @@ def plot_confusion_matrix(y_true, y_pred, classes):
     disp.plot(cmap=plt.cm.Blues, values_format='d')
     plt.title('Confusion Matrix')
     plt.grid(False)
-    plt.savefig('MLP_confusion_matrix.png')
+    plt.savefig('DNN_confusion_matrix.png')
     plt.show()
 
 # Plot ROC-AUC Curves
@@ -307,7 +307,7 @@ def plot_roc_auc(y_true, y_pred, num_classes):
     plt.title('ROC-AUC Curves')
     plt.legend(loc='best')
     plt.grid(True)
-    plt.savefig('MLP_roc_auc.png')
+    plt.savefig('DNN_roc_auc.png')
     plt.show()
 
 # Main Execution
@@ -376,7 +376,8 @@ def main():
 
         print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
               f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_acc:.4f} | Time: {train_time:.2f} minutes")
+              f"Val Acc: {val_acc:.4f} | "
+              f"Training Time: {train_time:.2f} seconds | Evaluation Time: {eval_time:.2f} seconds")
 
     total_time = (time.time() - total_start_time) / 60
     print(f"Total Training Time: {total_time:.2f} minutes")

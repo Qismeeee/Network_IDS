@@ -320,7 +320,8 @@ if __name__ == '__main__':
         print(f"Epoch [{epoch + 1}/{num_epochs}], "
               f"Train Loss: {train_loss:.4f}, Train Accuracy: {
                   train_accuracy:.4f}, "
-              f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}")
+              f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}",
+    f"Training Time: {train_time:.2f} seconds | Evaluation Time: {eval_time:.2f} seconds")
 
     # Evaluate the model on the test set
     final_val_loss, final_val_accuracy, _, test_preds, test_labels = validate_epoch(
