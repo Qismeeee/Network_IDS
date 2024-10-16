@@ -8,6 +8,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
 from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.metrics import (
     classification_report,
     accuracy_score,
@@ -46,7 +47,7 @@ class FocalLoss(nn.Module):
             return F_loss
 
 
-def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=False, apply_boxcox=False):
+def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
     NB15_1 = pd.read_csv(root + 'UNSW-NB15_1.csv', low_memory=False)
     NB15_2 = pd.read_csv(root + 'UNSW-NB15_2.csv', low_memory=False)
     NB15_3 = pd.read_csv(root + 'UNSW-NB15_3.csv', low_memory=False)
@@ -91,14 +92,6 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
         for col in numeric_cols:
             train_df[col] = np.log1p(train_df[col])
 
-    if apply_boxcox:
-        power_transformer = PowerTransformer(
-            method='box-cox', standardize=False)
-        for col in numeric_cols:
-            train_df[col] = np.where(train_df[col] > 0, train_df[col], 1e-6)
-        train_df[numeric_cols] = power_transformer.fit_transform(
-            train_df[numeric_cols])
-
     train_df['duration'] = train_df['Ltime'] - train_df['Stime']
     train_df['byte_ratio'] = train_df['sbytes'] / (train_df['dbytes'] + 1)
     train_df['pkt_ratio'] = train_df['Spkts'] / (train_df['Dpkts'] + 1)
@@ -108,7 +101,7 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
         (train_df['synack'] + train_df['ackdat'] + 1)
 
     columns_to_drop = ['sport', 'dsport', 'proto',
-                       'srcip', 'dstip', 'state', 'service']
+                       'srcip', 'dstip', 'state', 'service', 'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime']
     train_df = train_df.drop(columns=columns_to_drop, errors='ignore')
 
     X = train_df.drop(['attack_cat'], axis=1)
@@ -132,7 +125,6 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     X_test_scaled = scaler.transform(X_test)
 
     return X_train_scaled, X_test_scaled, y_train, y_test
-
 
 
 class TransformerClassifier(nn.Module):
@@ -161,7 +153,6 @@ class TransformerClassifier(nn.Module):
         x = self.dropout(x)
         logits = self.fc(x)
         return logits
-
 
 
 def train_epoch(model, train_loader, optimizer, criterion, scaler, device):
@@ -272,7 +263,6 @@ def plot_training_evaluation_time(train_times, eval_times):
     plt.show()
 
 
-
 def plot_confusion_matrix(y_true, y_pred, classes):
     cm = confusion_matrix(y_true, y_pred)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
@@ -282,7 +272,6 @@ def plot_confusion_matrix(y_true, y_pred, classes):
     plt.grid(False)
     plt.savefig('transformer_confusion_matrix.png')
     plt.show()
-
 
 
 def plot_roc_auc(y_true, y_pred, num_classes):

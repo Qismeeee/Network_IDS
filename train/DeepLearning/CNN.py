@@ -7,12 +7,12 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
 import matplotlib.pyplot as plt
 import time
-from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import ConfusionMatrixDisplay
 
@@ -74,7 +74,7 @@ class FocalLoss(nn.Module):
             return F_loss
 
 
-def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=False, apply_boxcox=False):
+def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
     NB15_1 = pd.read_csv(root + 'UNSW-NB15_1.csv', low_memory=False)
     NB15_2 = pd.read_csv(root + 'UNSW-NB15_2.csv', low_memory=False)
     NB15_3 = pd.read_csv(root + 'UNSW-NB15_3.csv', low_memory=False)
@@ -119,14 +119,6 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
         for col in numeric_cols:
             train_df[col] = np.log1p(train_df[col])
 
-    if apply_boxcox:
-        power_transformer = PowerTransformer(
-            method='box-cox', standardize=False)
-        for col in numeric_cols:
-            train_df[col] = np.where(train_df[col] > 0, train_df[col], 1e-6)
-        train_df[numeric_cols] = power_transformer.fit_transform(
-            train_df[numeric_cols])
-
     train_df['duration'] = train_df['Ltime'] - train_df['Stime']
     train_df['byte_ratio'] = train_df['sbytes'] / (train_df['dbytes'] + 1)
     train_df['pkt_ratio'] = train_df['Spkts'] / (train_df['Dpkts'] + 1)
@@ -136,7 +128,7 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
         (train_df['synack'] + train_df['ackdat'] + 1)
 
     columns_to_drop = ['sport', 'dsport', 'proto',
-                       'srcip', 'dstip', 'state', 'service']
+                       'srcip', 'dstip', 'state', 'service', 'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime']
     train_df = train_df.drop(columns=columns_to_drop, errors='ignore')
 
     X = train_df.drop(['attack_cat'], axis=1)
@@ -313,13 +305,14 @@ def main():
     learning_rate = 1e-4
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Load và tiền xử lý dữ liệu
     X_train, X_test, y_train, y_test = load_and_preprocess_data(root)
-    X_train_tensor = torch.tensor(X_train, dtype=torch.float32).unsqueeze(
-        1)
+    X_train_tensor = torch.tensor(X_train, dtype=torch.float32).unsqueeze(1)
     y_train_tensor = torch.tensor(y_train.values, dtype=torch.long)
     y_test_tensor = torch.tensor(y_test.values, dtype=torch.long)
     X_test_tensor = torch.tensor(X_test, dtype=torch.float32).unsqueeze(1)
 
+    # Tạo TensorDataset và DataLoader
     train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
     test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
     train_loader = DataLoader(
@@ -331,6 +324,7 @@ def main():
     num_classes = len(np.unique(y_train))
     model = CNNModel(input_dim=input_dim, num_classes=num_classes).to(device)
 
+    # Khởi tạo optimizer và Focal Loss
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     class_weights = compute_class_weight(
         'balanced', classes=np.unique(y_train), y=y_train)
@@ -339,30 +333,48 @@ def main():
 
     train_accuracies, val_accuracies = [], []
     train_losses, val_losses = [], []
+    train_times, eval_times = [], []
 
     for epoch in range(num_epochs):
         start_time = time.time()
 
+        # Huấn luyện mô hình
         train_loss, train_acc = train_epoch(
-            model, train_loader, optimizer, criterion, device)  # Fix: Remove train_time
+            model, train_loader, optimizer, criterion, device)
+        train_time = (time.time() - start_time) / \
+            60  # Tính thời gian huấn luyện
 
+        # Đánh giá mô hình
+        eval_start_time = time.time()
         val_loss, val_acc, val_preds, val_labels = validate_epoch(
-            model, test_loader, criterion, device)  # Fix: Remove eval_time
+            model, test_loader, criterion, device)
+        eval_time = time.time() - eval_start_time  # Tính thời gian đánh giá
 
+        # Lưu kết quả
         train_accuracies.append(train_acc)
         val_accuracies.append(val_acc)
         train_losses.append(train_loss)
         val_losses.append(val_loss)
+        train_times.append(train_time)
+        eval_times.append(eval_time)
 
+        # In ra kết quả từng epoch
         print(f"Epoch {epoch + 1}/{num_epochs} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
-              f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Time: {time.time() - start_time:.2f} seconds")
+              f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Train Time: {train_time:.2f} minutes | Eval Time: {eval_time:.2f} seconds")
 
+    # Vẽ biểu đồ kết quả sau huấn luyện
     plot_accuracy_loss(train_accuracies, val_accuracies,
                        train_losses, val_losses)
 
+    # Vẽ biểu đồ thời gian huấn luyện và đánh giá
+    plot_training_evaluation_time(train_times, eval_times)
+
+    # Vẽ confusion matrix và ROC-AUC
     classes = [str(i) for i in np.unique(y_train)]
     plot_confusion_matrix(val_labels, val_preds, classes)
     plot_roc_auc(val_labels, val_preds, num_classes)
+
+    # In Classification Report
     print("Classification Report:")
     print(classification_report(val_labels, val_preds, target_names=classes))
 

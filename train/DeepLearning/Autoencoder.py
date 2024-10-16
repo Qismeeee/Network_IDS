@@ -1,3 +1,4 @@
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 import pandas as pd
 import numpy as np
 import torch
@@ -6,25 +7,13 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import (
-    classification_report,
-    accuracy_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    confusion_matrix,
-    ConfusionMatrixDisplay,
-    roc_curve,
-    auc
-)
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
-import time
-from sklearn.preprocessing import LabelEncoder
 from imblearn.over_sampling import RandomOverSampler
-from sklearn.utils.class_weight import compute_class_weight
+from sklearn.preprocessing import LabelEncoder
+import time
 
 
 class FocalLoss(nn.Module):
@@ -45,6 +34,28 @@ class FocalLoss(nn.Module):
             return torch.sum(F_loss)
         else:
             return F_loss
+
+
+class Autoencoder(nn.Module):
+    def __init__(self, input_dim, encoding_dim=64):
+        super(Autoencoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, encoding_dim),
+            nn.ReLU(True),
+            nn.Linear(encoding_dim, encoding_dim // 2),
+            nn.ReLU(True)
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(encoding_dim // 2, encoding_dim),
+            nn.ReLU(True),
+            nn.Linear(encoding_dim, input_dim),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return decoded
 
 
 def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
@@ -92,14 +103,6 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
         for col in numeric_cols:
             train_df[col] = np.log1p(train_df[col])
 
-    train_df['duration'] = train_df['Ltime'] - train_df['Stime']
-    train_df['byte_ratio'] = train_df['sbytes'] / (train_df['dbytes'] + 1)
-    train_df['pkt_ratio'] = train_df['Spkts'] / (train_df['Dpkts'] + 1)
-    train_df['load_ratio'] = train_df['Sload'] / (train_df['Dload'] + 1)
-    train_df['jit_ratio'] = train_df['Sjit'] / (train_df['Djit'] + 1)
-    train_df['tcp_setup_ratio'] = train_df['tcprtt'] / \
-        (train_df['synack'] + train_df['ackdat'] + 1)
-
     columns_to_drop = ['sport', 'dsport', 'proto',
                        'srcip', 'dstip', 'state', 'service', 'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime']
     train_df = train_df.drop(columns=columns_to_drop, errors='ignore')
@@ -125,31 +128,6 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     X_test_scaled = scaler.transform(X_test)
 
     return X_train_scaled, X_test_scaled, y_train, y_test
-
-
-class GRUClassifier(nn.Module):
-    def __init__(self, input_dim, num_classes, hidden_dim=128, num_layers=2, dropout=0.1):
-        super(GRUClassifier, self).__init__()
-        self.embedding = nn.Linear(input_dim, hidden_dim)
-        self.gru = nn.GRU(
-            input_size=hidden_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            dropout=dropout,
-            batch_first=True
-        )
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim, num_classes)
-        self.layer_norm = nn.LayerNorm(hidden_dim)
-
-    def forward(self, x):
-        x = self.embedding(x).unsqueeze(1)
-        x = self.layer_norm(x)
-        gru_out, _ = self.gru(x)
-        x = torch.mean(gru_out, dim=1)
-        x = self.dropout(x)
-        logits = self.fc(x)
-        return logits
 
 
 def train_epoch(model, train_loader, optimizer, criterion, scaler, device):
@@ -222,7 +200,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Accuracy')
     plt.legend()
     plt.grid(True)
-    plt.savefig('GRU_accuracy.png')
+    plt.savefig('transformer_accuracy.png')
     plt.show()
 
     plt.figure(figsize=(8, 6))
@@ -233,7 +211,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid(True)
-    plt.savefig('GRU_loss.png')
+    plt.savefig('transformer_loss.png')
     plt.show()
 
 
@@ -256,7 +234,7 @@ def plot_training_evaluation_time(train_times, eval_times):
     plt.title("Training and Evaluation Time per Epoch")
     fig.tight_layout()  # to avoid overlap
     plt.grid(True)
-    plt.savefig('GRU_train_evaluation_time.png')
+    plt.savefig('transformer_train_evaluation_time.png')
     plt.show()
 
 
@@ -267,7 +245,7 @@ def plot_confusion_matrix(y_true, y_pred, classes):
     disp.plot(cmap=plt.cm.Blues, values_format='d')
     plt.title('Confusion Matrix')
     plt.grid(False)
-    plt.savefig('GRU_confusion_matrix.png')
+    plt.savefig('transformer_confusion_matrix.png')
     plt.show()
 
 
@@ -298,12 +276,12 @@ def plot_roc_auc(y_true, y_pred, num_classes):
     plt.title('ROC-AUC Curves')
     plt.legend(loc='best')
     plt.grid(True)
-    plt.savefig('GRU_roc_auc.png')
+    plt.savefig('transformer_roc_auc.png')
     plt.show()
 
 
 def main():
-    root = 'data/'
+    root = "data/"
     batch_size = 512
     num_epochs = 100
     learning_rate = 1e-4
@@ -331,8 +309,8 @@ def main():
         test_dataset, batch_size=batch_size, shuffle=False)
 
     input_dim = X_train.shape[1]
-    model = GRUClassifier(input_dim=input_dim,
-                          num_classes=num_classes).to(device)
+    model = Autoencoder(
+        input_dim=input_dim, num_classes=num_classes).to(device)
     optimizer = optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -343,6 +321,7 @@ def main():
     train_accuracies, val_accuracies = [], []
     train_losses, val_losses = [], []
     train_times, eval_times = [], []
+
     total_start_time = time.time()
 
     for epoch in range(1, num_epochs + 1):

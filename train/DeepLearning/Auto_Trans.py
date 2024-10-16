@@ -6,9 +6,9 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
 from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.metrics import (
     classification_report,
     accuracy_score,
@@ -25,26 +25,6 @@ import time
 from sklearn.preprocessing import LabelEncoder
 from imblearn.over_sampling import RandomOverSampler
 from sklearn.utils.class_weight import compute_class_weight
-
-
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=1, gamma=2, reduction='mean'):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, inputs, targets):
-        BCE_loss = nn.CrossEntropyLoss(reduction='none')(inputs, targets)
-        pt = torch.exp(-BCE_loss)
-        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
-
-        if self.reduction == 'mean':
-            return torch.mean(F_loss)
-        elif self.reduction == 'sum':
-            return torch.sum(F_loss)
-        else:
-            return F_loss
 
 
 def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
@@ -127,31 +107,93 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     return X_train_scaled, X_test_scaled, y_train, y_test
 
 
-class GRUClassifier(nn.Module):
-    def __init__(self, input_dim, num_classes, hidden_dim=128, num_layers=2, dropout=0.1):
-        super(GRUClassifier, self).__init__()
-        self.embedding = nn.Linear(input_dim, hidden_dim)
-        self.gru = nn.GRU(
-            input_size=hidden_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=1, gamma=2, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        BCE_loss = nn.CrossEntropyLoss(reduction='none')(inputs, targets)
+        pt = torch.exp(-BCE_loss)
+        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
+
+        if self.reduction == 'mean':
+            return torch.mean(F_loss)
+        elif self.reduction == 'sum':
+            return torch.sum(F_loss)
+        else:
+            return F_loss
+
+# Autoencoder model
+
+
+class Autoencoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super(Autoencoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU()
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(hidden_dim // 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, input_dim)
+        )
+
+    def forward(self, x):
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return encoded, decoded
+
+
+# Transformer Classifier
+class TransformerClassifier(nn.Module):
+    def __init__(self, input_dim, num_classes, d_model=128, n_heads=8, num_layers=2, dropout=0.1):
+        super(TransformerClassifier, self).__init__()
+        self.embedding = nn.Linear(input_dim, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=512,
             dropout=dropout,
+            activation='gelu',
             batch_first=True
         )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_layers)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim, num_classes)
-        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.fc = nn.Linear(d_model, num_classes)
+        self.layer_norm = nn.LayerNorm(d_model)
 
     def forward(self, x):
         x = self.embedding(x).unsqueeze(1)
         x = self.layer_norm(x)
-        gru_out, _ = self.gru(x)
-        x = torch.mean(gru_out, dim=1)
+        x = self.transformer(x)
+        x = torch.mean(x, dim=1)
         x = self.dropout(x)
         logits = self.fc(x)
         return logits
 
 
+# Hybrid Model combining Autoencoder and Transformer
+class HybridAutoencoderTransformer(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_classes, d_model=128, n_heads=8, num_layers=2, dropout=0.1):
+        super(HybridAutoencoderTransformer, self).__init__()
+        self.autoencoder = Autoencoder(input_dim, hidden_dim)
+        self.transformer = TransformerClassifier(
+            hidden_dim // 2, num_classes, d_model, n_heads, num_layers, dropout)
+
+    def forward(self, x):
+        encoded, _ = self.autoencoder(x)
+        logits = self.transformer(encoded)
+        return logits
+
+
+# Training and evaluation functions
 def train_epoch(model, train_loader, optimizer, criterion, scaler, device):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
@@ -222,7 +264,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Accuracy')
     plt.legend()
     plt.grid(True)
-    plt.savefig('GRU_accuracy.png')
+    plt.savefig('transformer_accuracy.png')
     plt.show()
 
     plt.figure(figsize=(8, 6))
@@ -233,7 +275,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid(True)
-    plt.savefig('GRU_loss.png')
+    plt.savefig('transformer_loss.png')
     plt.show()
 
 
@@ -256,7 +298,7 @@ def plot_training_evaluation_time(train_times, eval_times):
     plt.title("Training and Evaluation Time per Epoch")
     fig.tight_layout()  # to avoid overlap
     plt.grid(True)
-    plt.savefig('GRU_train_evaluation_time.png')
+    plt.savefig('transformer_train_evaluation_time.png')
     plt.show()
 
 
@@ -267,7 +309,7 @@ def plot_confusion_matrix(y_true, y_pred, classes):
     disp.plot(cmap=plt.cm.Blues, values_format='d')
     plt.title('Confusion Matrix')
     plt.grid(False)
-    plt.savefig('GRU_confusion_matrix.png')
+    plt.savefig('transformer_confusion_matrix.png')
     plt.show()
 
 
@@ -298,12 +340,12 @@ def plot_roc_auc(y_true, y_pred, num_classes):
     plt.title('ROC-AUC Curves')
     plt.legend(loc='best')
     plt.grid(True)
-    plt.savefig('GRU_roc_auc.png')
+    plt.savefig('transformer_roc_auc.png')
     plt.show()
 
 
 def main():
-    root = 'data/'
+    root = "data/"
     batch_size = 512
     num_epochs = 100
     learning_rate = 1e-4
@@ -331,8 +373,9 @@ def main():
         test_dataset, batch_size=batch_size, shuffle=False)
 
     input_dim = X_train.shape[1]
-    model = GRUClassifier(input_dim=input_dim,
-                          num_classes=num_classes).to(device)
+    hidden_dim = 256
+    model = HybridAutoencoderTransformer(
+        input_dim=input_dim, hidden_dim=hidden_dim, num_classes=num_classes).to(device)
     optimizer = optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -343,6 +386,7 @@ def main():
     train_accuracies, val_accuracies = [], []
     train_losses, val_losses = [], []
     train_times, eval_times = [], []
+
     total_start_time = time.time()
 
     for epoch in range(1, num_epochs + 1):

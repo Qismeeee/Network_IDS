@@ -6,9 +6,9 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
 from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.metrics import (
     classification_report,
     accuracy_score,
@@ -23,12 +23,12 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import time
 from sklearn.preprocessing import LabelEncoder
-from imblearn.over_sampling import RandomOverSampler
-from sklearn.utils.class_weight import compute_class_weight
+
+# Focal Loss Definition
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=1, gamma=2, reduction='mean'):
+    def __init__(self, alpha=None, gamma=2, reduction='mean'):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -37,7 +37,11 @@ class FocalLoss(nn.Module):
     def forward(self, inputs, targets):
         BCE_loss = nn.CrossEntropyLoss(reduction='none')(inputs, targets)
         pt = torch.exp(-BCE_loss)
-        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
+        F_loss = (1 - pt) ** self.gamma * BCE_loss
+
+        if self.alpha is not None:
+            alpha_t = self.alpha.gather(0, targets.data.view(-1))
+            F_loss = alpha_t * F_loss
 
         if self.reduction == 'mean':
             return torch.mean(F_loss)
@@ -45,6 +49,8 @@ class FocalLoss(nn.Module):
             return torch.sum(F_loss)
         else:
             return F_loss
+
+# Data Preprocessing Function
 
 
 def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
@@ -127,61 +133,43 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     return X_train_scaled, X_test_scaled, y_train, y_test
 
 
-class GRUClassifier(nn.Module):
-    def __init__(self, input_dim, num_classes, hidden_dim=128, num_layers=2, dropout=0.1):
-        super(GRUClassifier, self).__init__()
-        self.embedding = nn.Linear(input_dim, hidden_dim)
-        self.gru = nn.GRU(
-            input_size=hidden_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            dropout=dropout,
-            batch_first=True
-        )
+class RNNModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=2, dropout=0.3):
+        super(RNNModel, self).__init__()
+        self.rnn = nn.RNN(
+            input_dim, hidden_dim, num_layers=num_layers, dropout=dropout, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, output_dim)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim, num_classes)
-        self.layer_norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, x):
-        x = self.embedding(x).unsqueeze(1)
-        x = self.layer_norm(x)
-        gru_out, _ = self.gru(x)
-        x = torch.mean(gru_out, dim=1)
-        x = self.dropout(x)
-        logits = self.fc(x)
-        return logits
+        x, _ = self.rnn(x)
+        x = self.fc(self.dropout(x[:, -1, :]))  # Output from the last timestep
+        return x
 
 
-def train_epoch(model, train_loader, optimizer, criterion, scaler, device):
+def train_epoch(model, train_loader, optimizer, criterion, device):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
-    all_preds, all_labels = [], []
     start_time = time.time()
 
     for inputs, labels in train_loader:
         inputs, labels = inputs.to(device), labels.to(device)
         optimizer.zero_grad()
 
-        with torch.cuda.amp.autocast():
-            logits = model(inputs)
-            loss = criterion(logits, labels)
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
 
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        optimizer.step()
 
         total_loss += loss.item()
-        _, predicted = torch.max(logits, 1)
+        _, predicted = torch.max(outputs, 1)
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
 
-        all_preds.extend(predicted.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
-
-    end_time = time.time()
-    epoch_time = (end_time - start_time) / 60
-    train_accuracy = correct / total
-    return total_loss / len(train_loader), train_accuracy, epoch_time, all_preds, all_labels
+    epoch_time = time.time() - start_time
+    accuracy = correct / total
+    return total_loss / len(train_loader), accuracy, epoch_time
 
 
 def validate_epoch(model, test_loader, criterion, device):
@@ -193,190 +181,155 @@ def validate_epoch(model, test_loader, criterion, device):
     with torch.no_grad():
         for inputs, labels in test_loader:
             inputs, labels = inputs.to(device), labels.to(device)
-            logits = model(inputs)
-            loss = criterion(logits, labels)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
 
             val_loss += loss.item()
-            _, predicted = torch.max(logits, 1)
+            _, predicted = torch.max(outputs, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
-    end_time = time.time()
-    eval_time = end_time - start_time
-    val_accuracy = correct / total
-    return val_loss / len(test_loader), val_accuracy, eval_time, all_preds, all_labels
+    eval_time = time.time() - start_time
+    accuracy = correct / total
+    return val_loss / len(test_loader), accuracy, eval_time, all_preds, all_labels
 
 
 def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losses):
     epochs = np.arange(1, len(train_accuracies) + 1)
 
+    # Plot accuracy
     plt.figure(figsize=(8, 6))
-    plt.plot(epochs, train_accuracies, label='Training Accuracy', color='blue')
-    plt.plot(epochs, val_accuracies,
-             label='Validation Accuracy', color='orange')
+    plt.plot(epochs, train_accuracies, label='Train Accuracy')
+    plt.plot(epochs, val_accuracies, label='Validation Accuracy')
+    plt.title('Training and Validation Accuracy')
     plt.xlabel('Epochs')
     plt.ylabel('Accuracy')
-    plt.title('Training and Validation Accuracy')
     plt.legend()
     plt.grid(True)
-    plt.savefig('GRU_accuracy.png')
+    plt.savefig("RNN_acc.png")
     plt.show()
 
+    # Plot loss
     plt.figure(figsize=(8, 6))
-    plt.plot(epochs, train_losses, label='Training Loss', color='blue')
-    plt.plot(epochs, val_losses, label='Validation Loss', color='orange')
+    plt.plot(epochs, train_losses, label='Train Loss')
+    plt.plot(epochs, val_losses, label='Validation Loss')
+    plt.title('Training and Validation Loss')
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid(True)
-    plt.savefig('GRU_loss.png')
+    plt.savefig("RNN_loss.png")
     plt.show()
 
 
-def plot_training_evaluation_time(train_times, eval_times):
-    epochs = np.arange(1, len(train_times) + 1)
-    fig, ax1 = plt.subplots(figsize=(8, 6))
-
-    color = 'tab:blue'
-    ax1.set_xlabel('Epochs')
-    ax1.set_ylabel('Training Time (minutes)', color=color)
-    ax1.plot(epochs, train_times, label='Training Time', color=color)
-    ax1.tick_params(axis='y', labelcolor=color)
-
-    ax2 = ax1.twinx()
-    color = 'tab:red'
-    ax2.set_ylabel('Evaluation Time (seconds)', color=color)
-    ax2.plot(epochs, eval_times, label='Evaluation Time', color=color)
-    ax2.tick_params(axis='y', labelcolor=color)
-
-    plt.title("Training and Evaluation Time per Epoch")
-    fig.tight_layout()  # to avoid overlap
-    plt.grid(True)
-    plt.savefig('GRU_train_evaluation_time.png')
-    plt.show()
-
-
-def plot_confusion_matrix(y_true, y_pred, classes):
-    cm = confusion_matrix(y_true, y_pred)
+def plot_confusion_matrix(test_labels, test_preds, classes):
+    cm = confusion_matrix(test_labels, test_preds)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
-    plt.figure(figsize=(10, 8))
-    disp.plot(cmap=plt.cm.Blues, values_format='d')
+    disp.plot(cmap=plt.cm.Blues)
     plt.title('Confusion Matrix')
-    plt.grid(False)
-    plt.savefig('GRU_confusion_matrix.png')
+    plt.grid(True)
+    plt.savefig("RNN_confusion_matrix.png")
     plt.show()
 
 
-def plot_roc_auc(y_true, y_pred, num_classes):
-    y_true_bin = label_binarize(y_true, classes=np.arange(num_classes))
-    y_pred_bin = label_binarize(y_pred, classes=np.arange(num_classes))
+def plot_roc_auc(test_labels, test_preds, num_classes):
+    test_labels_bin = label_binarize(
+        test_labels, classes=np.arange(num_classes))
+    fpr, tpr, roc_auc = dict(), dict(), dict()
 
-    fpr_micro, tpr_micro, _ = roc_curve(y_true_bin.ravel(), y_pred_bin.ravel())
-    roc_auc_micro = auc(fpr_micro, tpr_micro)
-
-    fpr = dict()
-    tpr = dict()
-    roc_auc = dict()
     for i in range(num_classes):
-        fpr[i], tpr[i], _ = roc_curve(y_true_bin[:, i], y_pred_bin[:, i])
+        fpr[i], tpr[i], _ = roc_curve(test_labels_bin[:, i], test_preds[:, i])
         roc_auc[i] = auc(fpr[i], tpr[i])
 
-    plt.figure(figsize=(8, 6))
-    plt.plot(fpr_micro, tpr_micro, color='blue',
-             label=f'Micro-AUC = {roc_auc_micro:.4f}')
-
+    plt.figure()
     for i in range(num_classes):
-        plt.plot(fpr[i], tpr[i], label=f'Class {i} AUC = {roc_auc[i]:.4f}')
+        plt.plot(fpr[i], tpr[i], label=f'Class {i} (AUC = {roc_auc[i]:.2f})')
 
-    plt.plot([0, 1], [0, 1], linestyle='--', color='grey')
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.title('Receiver Operating Characteristic')
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
-    plt.title('ROC-AUC Curves')
-    plt.legend(loc='best')
+    plt.legend(loc='lower right')
     plt.grid(True)
-    plt.savefig('GRU_roc_auc.png')
+    plt.savefig("RNN_roc.png")
     plt.show()
 
 
-def main():
-    root = 'data/'
-    batch_size = 512
-    num_epochs = 100
-    learning_rate = 1e-4
-    weight_decay = 1e-5
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def evaluate_model(test_labels, test_preds):
+    report = classification_report(test_labels, test_preds, target_names=[
+                                   f'Class {i}' for i in range(len(set(test_labels)))])
+    print(report)
 
+
+# Main Execution
+if __name__ == '__main__':
+    # Load and preprocess the dataset
+    root = 'data/'  # Update with your dataset path
     X_train, X_test, y_train, y_test = load_and_preprocess_data(root)
 
-    classes = sorted(y_train.unique())
-    num_classes = len(classes)
-    label_encoder = LabelEncoder()
-    y_train_enc = label_encoder.fit_transform(y_train)
-    y_test_enc = label_encoder.transform(y_test)
+    # Convert data to PyTorch tensors
+    X_train_tensor = torch.tensor(X_train, dtype=torch.float32).unsqueeze(
+        1)  # Add a dimension for sequence length
+    X_test_tensor = torch.tensor(X_test, dtype=torch.float32).unsqueeze(1)
+    y_train_tensor = torch.tensor(y_train.values, dtype=torch.long)
+    y_test_tensor = torch.tensor(y_test.values, dtype=torch.long)
 
-    X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-    y_train_tensor = torch.tensor(y_train_enc, dtype=torch.long)
-    X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
-    y_test_tensor = torch.tensor(y_test_enc, dtype=torch.long)
-
+    # Create DataLoader
     train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
     test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=512, shuffle=False)
 
+    # Define model parameters
     input_dim = X_train.shape[1]
-    model = GRUClassifier(input_dim=input_dim,
-                          num_classes=num_classes).to(device)
-    optimizer = optim.AdamW(
-        model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=10, T_mult=2, eta_min=1e-6)
-    criterion = FocalLoss(alpha=1, gamma=2)
-    scaler_fp16 = torch.cuda.amp.GradScaler()
+    hidden_dim = 64
+    output_dim = len(set(y_train))
+    num_layers = 2
+    dropout = 0.3
 
-    train_accuracies, val_accuracies = [], []
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Initialize the model, loss function, and optimizer
+    model = RNNModel(input_dim, hidden_dim, output_dim,
+                     num_layers, dropout).to(device)
+    criterion = FocalLoss(alpha=None, gamma=2, reduction='mean')
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    # Training and validation parameters
+    num_epochs = 100  # Set your desired number of epochs
     train_losses, val_losses = [], []
+    train_accuracies, val_accuracies = [], []
     train_times, eval_times = [], []
-    total_start_time = time.time()
 
-    for epoch in range(1, num_epochs + 1):
-        train_loss, train_acc, train_time, train_preds, train_labels = train_epoch(
-            model, train_loader, optimizer, criterion, scaler_fp16, device)
-
-        val_loss, val_acc, eval_time, val_preds, val_labels = validate_epoch(
+    for epoch in range(num_epochs):
+        train_loss, train_accuracy, train_time = train_epoch(
+            model, train_loader, optimizer, criterion, device)
+        val_loss, val_accuracy, eval_time, val_preds, val_labels = validate_epoch(
             model, test_loader, criterion, device)
 
-        scheduler.step()
-        train_accuracies.append(train_acc)
-        val_accuracies.append(val_acc)
         train_losses.append(train_loss)
         val_losses.append(val_loss)
+        train_accuracies.append(train_accuracy)
+        val_accuracies.append(val_accuracy)
         train_times.append(train_time)
         eval_times.append(eval_time)
 
-        print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
-              f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_acc:.4f} | Time: {train_time:.2f} minutes")
+        print(f"Epoch [{epoch + 1}/{num_epochs}], "
+              f"Train Loss: {train_loss:.4f}, Train Accuracy: {
+                  train_accuracy:.4f}, "
+              f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}")
 
-    total_time = (time.time() - total_start_time) / 60
-    print(f"Total Training Time: {total_time:.2f} minutes")
+    # Evaluate the model on the test set
+    final_val_loss, final_val_accuracy, _, test_preds, test_labels = validate_epoch(
+        model, test_loader, criterion, device)
 
+    # Plotting
     plot_accuracy_loss(train_accuracies, val_accuracies,
                        train_losses, val_losses)
-    plot_training_evaluation_time(train_times, eval_times)
-    plot_confusion_matrix(val_labels, val_preds, classes)
-    plot_roc_auc(val_labels, val_preds, num_classes)
+    plot_confusion_matrix(test_labels, test_preds, classes=range(output_dim))
 
-    print("Classification Report:")
-    print(classification_report(val_labels, val_preds,
-          target_names=[str(c) for c in classes]))
-
-
-if __name__ == "__main__":
-    main()
+    # Final evaluation
+    evaluate_model(test_labels, test_preds)

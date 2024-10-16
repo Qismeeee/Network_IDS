@@ -6,9 +6,9 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
 from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.metrics import (
     classification_report,
     accuracy_score,
@@ -25,6 +25,8 @@ import time
 from sklearn.preprocessing import LabelEncoder
 from imblearn.over_sampling import RandomOverSampler
 from sklearn.utils.class_weight import compute_class_weight
+
+# Focal Loss Definition
 
 
 class FocalLoss(nn.Module):
@@ -45,6 +47,8 @@ class FocalLoss(nn.Module):
             return torch.sum(F_loss)
         else:
             return F_loss
+
+# Data Preprocessing Function
 
 
 def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
@@ -126,32 +130,27 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
 
     return X_train_scaled, X_test_scaled, y_train, y_test
 
+# MLP Model Definition
 
-class GRUClassifier(nn.Module):
-    def __init__(self, input_dim, num_classes, hidden_dim=128, num_layers=2, dropout=0.1):
-        super(GRUClassifier, self).__init__()
-        self.embedding = nn.Linear(input_dim, hidden_dim)
-        self.gru = nn.GRU(
-            input_size=hidden_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            dropout=dropout,
-            batch_first=True
+
+class MLPClassifier(nn.Module):
+    def __init__(self, input_dim, num_classes, hidden_dims=[128, 64], dropout=0.2):
+        super(MLPClassifier, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(input_dim, hidden_dims[0]),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dims[0], hidden_dims[1]),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dims[1], num_classes)
         )
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim, num_classes)
-        self.layer_norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, x):
-        x = self.embedding(x).unsqueeze(1)
-        x = self.layer_norm(x)
-        gru_out, _ = self.gru(x)
-        x = torch.mean(gru_out, dim=1)
-        x = self.dropout(x)
-        logits = self.fc(x)
-        return logits
+        return self.layers(x)
 
 
+# Training Function
 def train_epoch(model, train_loader, optimizer, criterion, scaler, device):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
@@ -183,6 +182,8 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, device):
     train_accuracy = correct / total
     return total_loss / len(train_loader), train_accuracy, epoch_time, all_preds, all_labels
 
+# Validation Function
+
 
 def validate_epoch(model, test_loader, criterion, device):
     model.eval()
@@ -209,6 +210,8 @@ def validate_epoch(model, test_loader, criterion, device):
     val_accuracy = correct / total
     return val_loss / len(test_loader), val_accuracy, eval_time, all_preds, all_labels
 
+# Plot Accuracy & Loss
+
 
 def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losses):
     epochs = np.arange(1, len(train_accuracies) + 1)
@@ -222,7 +225,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Accuracy')
     plt.legend()
     plt.grid(True)
-    plt.savefig('GRU_accuracy.png')
+    plt.savefig('MLP_accuracy.png')
     plt.show()
 
     plt.figure(figsize=(8, 6))
@@ -233,8 +236,10 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid(True)
-    plt.savefig('GRU_loss.png')
+    plt.savefig('MLP_loss.png')
     plt.show()
+
+# Plot Training & Evaluation Time
 
 
 def plot_training_evaluation_time(train_times, eval_times):
@@ -256,8 +261,10 @@ def plot_training_evaluation_time(train_times, eval_times):
     plt.title("Training and Evaluation Time per Epoch")
     fig.tight_layout()  # to avoid overlap
     plt.grid(True)
-    plt.savefig('GRU_train_evaluation_time.png')
+    plt.savefig('MLP_train_evaluation_time.png')
     plt.show()
+
+# Plot Confusion Matrix
 
 
 def plot_confusion_matrix(y_true, y_pred, classes):
@@ -267,8 +274,10 @@ def plot_confusion_matrix(y_true, y_pred, classes):
     disp.plot(cmap=plt.cm.Blues, values_format='d')
     plt.title('Confusion Matrix')
     plt.grid(False)
-    plt.savefig('GRU_confusion_matrix.png')
+    plt.savefig('MLP_confusion_matrix.png')
     plt.show()
+
+# Plot ROC-AUC Curves
 
 
 def plot_roc_auc(y_true, y_pred, num_classes):
@@ -298,8 +307,12 @@ def plot_roc_auc(y_true, y_pred, num_classes):
     plt.title('ROC-AUC Curves')
     plt.legend(loc='best')
     plt.grid(True)
-    plt.savefig('GRU_roc_auc.png')
+    plt.savefig('MLP_roc_auc.png')
     plt.show()
+
+# Main Execution
+# Main Execution
+# Main Execution
 
 
 def main():
@@ -331,8 +344,8 @@ def main():
         test_dataset, batch_size=batch_size, shuffle=False)
 
     input_dim = X_train.shape[1]
-    model = GRUClassifier(input_dim=input_dim,
-                          num_classes=num_classes).to(device)
+    model = MLPClassifier(input_dim=input_dim, num_classes=num_classes).to(
+        device)  # Thay thế Transformer bằng MLP
     optimizer = optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -343,6 +356,7 @@ def main():
     train_accuracies, val_accuracies = [], []
     train_losses, val_losses = [], []
     train_times, eval_times = [], []
+
     total_start_time = time.time()
 
     for epoch in range(1, num_epochs + 1):

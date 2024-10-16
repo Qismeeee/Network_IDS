@@ -3,10 +3,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import xgboost as xgb
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import (
@@ -25,26 +26,6 @@ import time
 from sklearn.preprocessing import LabelEncoder
 from imblearn.over_sampling import RandomOverSampler
 from sklearn.utils.class_weight import compute_class_weight
-
-
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=1, gamma=2, reduction='mean'):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, inputs, targets):
-        BCE_loss = nn.CrossEntropyLoss(reduction='none')(inputs, targets)
-        pt = torch.exp(-BCE_loss)
-        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
-
-        if self.reduction == 'mean':
-            return torch.mean(F_loss)
-        elif self.reduction == 'sum':
-            return torch.sum(F_loss)
-        else:
-            return F_loss
 
 
 def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
@@ -127,87 +108,48 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     return X_train_scaled, X_test_scaled, y_train, y_test
 
 
-class GRUClassifier(nn.Module):
-    def __init__(self, input_dim, num_classes, hidden_dim=128, num_layers=2, dropout=0.1):
-        super(GRUClassifier, self).__init__()
-        self.embedding = nn.Linear(input_dim, hidden_dim)
-        self.gru = nn.GRU(
-            input_size=hidden_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            dropout=dropout,
-            batch_first=True
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=1, gamma=2, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        BCE_loss = nn.CrossEntropyLoss(reduction='none')(inputs, targets)
+        pt = torch.exp(-BCE_loss)
+        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
+
+        if self.reduction == 'mean':
+            return torch.mean(F_loss)
+        elif self.reduction == 'sum':
+            return torch.sum(F_loss)
+        else:
+            return F_loss
+
+
+class Autoencoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super(Autoencoder, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU()
         )
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim, num_classes)
-        self.layer_norm = nn.LayerNorm(hidden_dim)
+        # Giải mã về đúng kích thước ban đầu (input_dim)
+        self.decoder = nn.Sequential(
+            nn.Linear(hidden_dim // 2, hidden_dim),
+            nn.ReLU(),
+            # Kích thước cuối cùng phải là input_dim
+            nn.Linear(hidden_dim, input_dim)
+        )
 
     def forward(self, x):
-        x = self.embedding(x).unsqueeze(1)
-        x = self.layer_norm(x)
-        gru_out, _ = self.gru(x)
-        x = torch.mean(gru_out, dim=1)
-        x = self.dropout(x)
-        logits = self.fc(x)
-        return logits
-
-
-def train_epoch(model, train_loader, optimizer, criterion, scaler, device):
-    model.train()
-    total_loss, correct, total = 0.0, 0, 0
-    all_preds, all_labels = [], []
-    start_time = time.time()
-
-    for inputs, labels in train_loader:
-        inputs, labels = inputs.to(device), labels.to(device)
-        optimizer.zero_grad()
-
-        with torch.cuda.amp.autocast():
-            logits = model(inputs)
-            loss = criterion(logits, labels)
-
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-        total_loss += loss.item()
-        _, predicted = torch.max(logits, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-
-        all_preds.extend(predicted.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
-
-    end_time = time.time()
-    epoch_time = (end_time - start_time) / 60
-    train_accuracy = correct / total
-    return total_loss / len(train_loader), train_accuracy, epoch_time, all_preds, all_labels
-
-
-def validate_epoch(model, test_loader, criterion, device):
-    model.eval()
-    val_loss, correct, total = 0.0, 0, 0
-    all_preds, all_labels = [], []
-    start_time = time.time()
-
-    with torch.no_grad():
-        for inputs, labels in test_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            logits = model(inputs)
-            loss = criterion(logits, labels)
-
-            val_loss += loss.item()
-            _, predicted = torch.max(logits, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-            all_preds.extend(predicted.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-
-    end_time = time.time()
-    eval_time = end_time - start_time
-    val_accuracy = correct / total
-    return val_loss / len(test_loader), val_accuracy, eval_time, all_preds, all_labels
+        encoded = self.encoder(x)
+        # Kết quả giải mã cần có kích thước bằng input_dim
+        decoded = self.decoder(encoded)
+        return encoded, decoded
 
 
 def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losses):
@@ -222,7 +164,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Accuracy')
     plt.legend()
     plt.grid(True)
-    plt.savefig('GRU_accuracy.png')
+    plt.savefig('autoencoder_xgboost_accuracy.png')
     plt.show()
 
     plt.figure(figsize=(8, 6))
@@ -233,30 +175,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid(True)
-    plt.savefig('GRU_loss.png')
-    plt.show()
-
-
-def plot_training_evaluation_time(train_times, eval_times):
-    epochs = np.arange(1, len(train_times) + 1)
-    fig, ax1 = plt.subplots(figsize=(8, 6))
-
-    color = 'tab:blue'
-    ax1.set_xlabel('Epochs')
-    ax1.set_ylabel('Training Time (minutes)', color=color)
-    ax1.plot(epochs, train_times, label='Training Time', color=color)
-    ax1.tick_params(axis='y', labelcolor=color)
-
-    ax2 = ax1.twinx()
-    color = 'tab:red'
-    ax2.set_ylabel('Evaluation Time (seconds)', color=color)
-    ax2.plot(epochs, eval_times, label='Evaluation Time', color=color)
-    ax2.tick_params(axis='y', labelcolor=color)
-
-    plt.title("Training and Evaluation Time per Epoch")
-    fig.tight_layout()  # to avoid overlap
-    plt.grid(True)
-    plt.savefig('GRU_train_evaluation_time.png')
+    plt.savefig('autoencoder_xgboost_loss.png')
     plt.show()
 
 
@@ -267,7 +186,7 @@ def plot_confusion_matrix(y_true, y_pred, classes):
     disp.plot(cmap=plt.cm.Blues, values_format='d')
     plt.title('Confusion Matrix')
     plt.grid(False)
-    plt.savefig('GRU_confusion_matrix.png')
+    plt.savefig('autoencoder_xgboost_confusion_matrix.png')
     plt.show()
 
 
@@ -298,84 +217,101 @@ def plot_roc_auc(y_true, y_pred, num_classes):
     plt.title('ROC-AUC Curves')
     plt.legend(loc='best')
     plt.grid(True)
-    plt.savefig('GRU_roc_auc.png')
+    plt.savefig('autoencoder_xgboost_roc_auc.png')
     plt.show()
 
 
 def main():
-    root = 'data/'
+    root = "data/"
+    hidden_dim = 128
     batch_size = 512
     num_epochs = 100
-    learning_rate = 1e-4
-    weight_decay = 1e-5
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    learning_rate = 1e-3
 
+    # Load và tiền xử lý dữ liệu
     X_train, X_test, y_train, y_test = load_and_preprocess_data(root)
 
-    classes = sorted(y_train.unique())
-    num_classes = len(classes)
-    label_encoder = LabelEncoder()
-    y_train_enc = label_encoder.fit_transform(y_train)
-    y_test_enc = label_encoder.transform(y_test)
+    input_dim = X_train.shape[1]
+
+    # Bước 1: Train Autoencoder để trích xuất đặc trưng
+    autoencoder = Autoencoder(input_dim=input_dim, hidden_dim=hidden_dim)
+    autoencoder_optimizer = torch.optim.Adam(
+        autoencoder.parameters(), lr=learning_rate)
+    criterion = nn.MSELoss()
 
     X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-    y_train_tensor = torch.tensor(y_train_enc, dtype=torch.long)
     X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
-    y_test_tensor = torch.tensor(y_test_enc, dtype=torch.long)
-
-    train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-    test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False)
-
-    input_dim = X_train.shape[1]
-    model = GRUClassifier(input_dim=input_dim,
-                          num_classes=num_classes).to(device)
-    optimizer = optim.AdamW(
-        model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=10, T_mult=2, eta_min=1e-6)
-    criterion = FocalLoss(alpha=1, gamma=2)
-    scaler_fp16 = torch.cuda.amp.GradScaler()
 
     train_accuracies, val_accuracies = [], []
     train_losses, val_losses = [], []
-    train_times, eval_times = [], []
-    total_start_time = time.time()
 
-    for epoch in range(1, num_epochs + 1):
-        train_loss, train_acc, train_time, train_preds, train_labels = train_epoch(
-            model, train_loader, optimizer, criterion, scaler_fp16, device)
+    print("Training Autoencoder...")
 
-        val_loss, val_acc, eval_time, val_preds, val_labels = validate_epoch(
-            model, test_loader, criterion, device)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    autoencoder.to(device)
 
-        scheduler.step()
-        train_accuracies.append(train_acc)
-        val_accuracies.append(val_acc)
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        train_times.append(train_time)
-        eval_times.append(eval_time)
+    for epoch in range(3):
+        start_time = time.time()
+        autoencoder_optimizer.zero_grad()
+        encoded, decoded = autoencoder(X_train_tensor)  # Cần lấy cả 'decoded'
+        # Tính toán MSELoss giữa đầu ra được giải mã và đầu vào
+        train_loss = criterion(decoded, X_train_tensor)
+        train_loss.backward()
+        autoencoder_optimizer.step()
 
-        print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
-              f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_acc:.4f} | Time: {train_time:.2f} minutes")
+        # Trích xuất đặc trưng từ Autoencoder sau epoch
+        autoencoder.eval()
+        with torch.no_grad():
+            X_train_encoded = autoencoder.encoder(X_train_tensor).numpy()
+            X_test_encoded = autoencoder.encoder(X_test_tensor).numpy()
 
-    total_time = (time.time() - total_start_time) / 60
-    print(f"Total Training Time: {total_time:.2f} minutes")
+        # Bước 2: Huấn luyện XGBoost với đặc trưng đã trích xuất từ Autoencoder
+        xgb_model = xgb.XGBClassifier(
+            n_estimators=100, use_label_encoder=False, eval_metric='mlogloss')
+        xgb_model.fit(X_train_encoded, y_train)
 
+        # Dự đoán cho train và test
+        y_train_pred = xgb_model.predict(X_train_encoded)
+        y_test_pred = xgb_model.predict(X_test_encoded)
+
+        # Tính toán độ chính xác và loss
+        train_accuracy = accuracy_score(y_train, y_train_pred)
+        test_accuracy = accuracy_score(y_test, y_test_pred)
+
+        train_loss_value = np.mean(
+            (y_train_pred - y_train) ** 2)  # Tính loss thủ công
+        test_loss_value = np.mean(
+            (y_test_pred - y_test) ** 2)  # Tính loss thủ công
+
+        end_time = time.time()
+
+        # Lưu lại kết quả cho từng epoch
+        train_accuracies.append(train_accuracy)
+        val_accuracies.append(test_accuracy)
+        train_losses.append(train_loss_value)
+        val_losses.append(test_loss_value)
+
+        print(f"Epoch {epoch + 1}/{num_epochs} | "
+              f"Train Accuracy: {train_accuracy:.4f} | Test Accuracy: {
+                  test_accuracy:.4f} | "
+              f"Train Loss: {train_loss_value:.4f} | Test Loss: {
+                  test_loss_value:.4f} | "
+              f"Training Time: {end_time - start_time:.2f} seconds")
+
+    # Sau khi hoàn thành toàn bộ quá trình huấn luyện, hiển thị báo cáo phân loại và các biểu đồ
+    print("\nTraining completed. Generating reports and plots...")
+
+    # Classification Report cho tập test
+    print("\nClassification Report for Test Set:")
+    print(classification_report(y_test, y_test_pred))
+
+    # Vẽ các biểu đồ
     plot_accuracy_loss(train_accuracies, val_accuracies,
                        train_losses, val_losses)
-    plot_training_evaluation_time(train_times, eval_times)
-    plot_confusion_matrix(val_labels, val_preds, classes)
-    plot_roc_auc(val_labels, val_preds, num_classes)
+    plot_confusion_matrix(y_test, y_test_pred, classes=np.unique(y_train))
+    plot_roc_auc(y_test, y_test_pred, num_classes=len(np.unique(y_train)))
 
-    print("Classification Report:")
-    print(classification_report(val_labels, val_preds,
-          target_names=[str(c) for c in classes]))
+    print("All tasks completed.")
 
 
 if __name__ == "__main__":

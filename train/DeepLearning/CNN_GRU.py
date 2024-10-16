@@ -4,9 +4,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import (
@@ -25,26 +25,6 @@ import time
 from sklearn.preprocessing import LabelEncoder
 from imblearn.over_sampling import RandomOverSampler
 from sklearn.utils.class_weight import compute_class_weight
-
-
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=1, gamma=2, reduction='mean'):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, inputs, targets):
-        BCE_loss = nn.CrossEntropyLoss(reduction='none')(inputs, targets)
-        pt = torch.exp(-BCE_loss)
-        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
-
-        if self.reduction == 'mean':
-            return torch.mean(F_loss)
-        elif self.reduction == 'sum':
-            return torch.sum(F_loss)
-        else:
-            return F_loss
 
 
 def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
@@ -127,72 +107,80 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     return X_train_scaled, X_test_scaled, y_train, y_test
 
 
-class GRUClassifier(nn.Module):
-    def __init__(self, input_dim, num_classes, hidden_dim=128, num_layers=2, dropout=0.1):
-        super(GRUClassifier, self).__init__()
-        self.embedding = nn.Linear(input_dim, hidden_dim)
-        self.gru = nn.GRU(
-            input_size=hidden_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            dropout=dropout,
-            batch_first=True
-        )
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=1, gamma=2, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        BCE_loss = nn.CrossEntropyLoss(reduction='none')(inputs, targets)
+        pt = torch.exp(-BCE_loss)
+        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
+
+        if self.reduction == 'mean':
+            return torch.mean(F_loss)
+        elif self.reduction == 'sum':
+            return torch.sum(F_loss)
+        else:
+            return F_loss
+
+
+class CNNGRU(nn.Module):
+    def __init__(self, input_dim, num_classes, hidden_size=128, num_layers=2, dropout=0.5):
+        super(CNNGRU, self).__init__()
+        self.conv1 = nn.Conv1d(
+            in_channels=1, out_channels=64, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm1d(64)
+        self.pool = nn.MaxPool1d(2)
+        self.gru = nn.GRU(64, hidden_size, num_layers=num_layers,
+                          dropout=dropout, batch_first=True)
+        self.fc = nn.Linear(hidden_size, num_classes)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_dim, num_classes)
-        self.layer_norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, x):
-        x = self.embedding(x).unsqueeze(1)
-        x = self.layer_norm(x)
-        gru_out, _ = self.gru(x)
-        x = torch.mean(gru_out, dim=1)
-        x = self.dropout(x)
-        logits = self.fc(x)
+        x = self.conv1(x.unsqueeze(1))
+        x = torch.relu(self.bn1(x))
+        x = self.pool(x)
+        x = x.transpose(1, 2)
+        out, _ = self.gru(x)
+        out = self.dropout(out[:, -1, :])
+        logits = self.fc(out)
         return logits
 
 
-def train_epoch(model, train_loader, optimizer, criterion, scaler, device):
+def train_epoch(model, train_loader, optimizer, criterion, device):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
-    all_preds, all_labels = [], []
-    start_time = time.time()
 
     for inputs, labels in train_loader:
         inputs, labels = inputs.to(device), labels.to(device)
         optimizer.zero_grad()
 
-        with torch.cuda.amp.autocast():
-            logits = model(inputs)
-            loss = criterion(logits, labels)
-
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        logits = model(inputs)
+        loss = criterion(logits, labels)
+        loss.backward()
+        optimizer.step()
 
         total_loss += loss.item()
         _, predicted = torch.max(logits, 1)
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
 
-        all_preds.extend(predicted.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
-
-    end_time = time.time()
-    epoch_time = (end_time - start_time) / 60
-    train_accuracy = correct / total
-    return total_loss / len(train_loader), train_accuracy, epoch_time, all_preds, all_labels
+    accuracy = correct / total
+    return total_loss / len(train_loader), accuracy
 
 
 def validate_epoch(model, test_loader, criterion, device):
     model.eval()
     val_loss, correct, total = 0.0, 0, 0
     all_preds, all_labels = [], []
-    start_time = time.time()
 
     with torch.no_grad():
         for inputs, labels in test_loader:
             inputs, labels = inputs.to(device), labels.to(device)
+
             logits = model(inputs)
             loss = criterion(logits, labels)
 
@@ -204,10 +192,8 @@ def validate_epoch(model, test_loader, criterion, device):
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
-    end_time = time.time()
-    eval_time = end_time - start_time
-    val_accuracy = correct / total
-    return val_loss / len(test_loader), val_accuracy, eval_time, all_preds, all_labels
+    accuracy = correct / total
+    return val_loss / len(test_loader), accuracy, all_preds, all_labels
 
 
 def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losses):
@@ -222,7 +208,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Accuracy')
     plt.legend()
     plt.grid(True)
-    plt.savefig('GRU_accuracy.png')
+    plt.savefig('cnn_gru_accuracy.png')
     plt.show()
 
     plt.figure(figsize=(8, 6))
@@ -233,7 +219,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid(True)
-    plt.savefig('GRU_loss.png')
+    plt.savefig('cnn_gru_loss.png')
     plt.show()
 
 
@@ -256,7 +242,7 @@ def plot_training_evaluation_time(train_times, eval_times):
     plt.title("Training and Evaluation Time per Epoch")
     fig.tight_layout()  # to avoid overlap
     plt.grid(True)
-    plt.savefig('GRU_train_evaluation_time.png')
+    plt.savefig('cnn_gru_train_evaluation_time.png')
     plt.show()
 
 
@@ -267,7 +253,7 @@ def plot_confusion_matrix(y_true, y_pred, classes):
     disp.plot(cmap=plt.cm.Blues, values_format='d')
     plt.title('Confusion Matrix')
     plt.grid(False)
-    plt.savefig('GRU_confusion_matrix.png')
+    plt.savefig('cnn_gru_confusion_matrix.png')
     plt.show()
 
 
@@ -298,30 +284,25 @@ def plot_roc_auc(y_true, y_pred, num_classes):
     plt.title('ROC-AUC Curves')
     plt.legend(loc='best')
     plt.grid(True)
-    plt.savefig('GRU_roc_auc.png')
+    plt.savefig('cnn_gru_roc_auc.png')
     plt.show()
+
+# Main function
 
 
 def main():
-    root = 'data/'
     batch_size = 512
     num_epochs = 100
     learning_rate = 1e-4
     weight_decay = 1e-5
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    X_train, X_test, y_train, y_test = load_and_preprocess_data(root)
-
-    classes = sorted(y_train.unique())
-    num_classes = len(classes)
-    label_encoder = LabelEncoder()
-    y_train_enc = label_encoder.fit_transform(y_train)
-    y_test_enc = label_encoder.transform(y_test)
-
-    X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-    y_train_tensor = torch.tensor(y_train_enc, dtype=torch.long)
-    X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
-    y_test_tensor = torch.tensor(y_test_enc, dtype=torch.long)
+    root = "data/"
+    X_train_scaled, X_test_scaled, y_train, y_test = load_and_preprocess_data(
+        root)
+    X_train_tensor = torch.tensor(X_train_scaled, dtype=torch.float32)
+    X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32)
+    y_train_tensor = torch.tensor(y_train.values, dtype=torch.long)
+    y_test_tensor = torch.tensor(y_test.values, dtype=torch.long)
 
     train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
     test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
@@ -330,52 +311,55 @@ def main():
     test_loader = DataLoader(
         test_dataset, batch_size=batch_size, shuffle=False)
 
-    input_dim = X_train.shape[1]
-    model = GRUClassifier(input_dim=input_dim,
-                          num_classes=num_classes).to(device)
+    input_dim = X_train_tensor.shape[1]
+    num_classes = len(np.unique(y_train))
+    model = CNNGRU(input_dim=input_dim, num_classes=num_classes).to(device)
+
     optimizer = optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=10, T_mult=2, eta_min=1e-6)
     criterion = FocalLoss(alpha=1, gamma=2)
-    scaler_fp16 = torch.cuda.amp.GradScaler()
 
     train_accuracies, val_accuracies = [], []
     train_losses, val_losses = [], []
     train_times, eval_times = [], []
     total_start_time = time.time()
 
-    for epoch in range(1, num_epochs + 1):
-        train_loss, train_acc, train_time, train_preds, train_labels = train_epoch(
-            model, train_loader, optimizer, criterion, scaler_fp16, device)
+    for epoch in range(num_epochs):
+        start_time = time.time()
 
-        val_loss, val_acc, eval_time, val_preds, val_labels = validate_epoch(
+        train_loss, train_acc = train_epoch(
+            model, train_loader, optimizer, criterion, device)
+        val_loss, val_acc, val_preds, val_labels = validate_epoch(
             model, test_loader, criterion, device)
 
-        scheduler.step()
         train_accuracies.append(train_acc)
         val_accuracies.append(val_acc)
         train_losses.append(train_loss)
         val_losses.append(val_loss)
-        train_times.append(train_time)
-        eval_times.append(eval_time)
 
-        print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
-              f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_acc:.4f} | Time: {train_time:.2f} minutes")
+        epoch_time = time.time() - start_time
+        train_times.append(epoch_time / 60)  # in minutes
+        eval_times.append(epoch_time)
 
-    total_time = (time.time() - total_start_time) / 60
+        print(f"Epoch {epoch + 1}/{num_epochs} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
+              f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Epoch Time: {epoch_time:.2f} seconds")
+
+    total_time = (time.time() - total_start_time) / 60  # in minutes
     print(f"Total Training Time: {total_time:.2f} minutes")
 
     plot_accuracy_loss(train_accuracies, val_accuracies,
                        train_losses, val_losses)
     plot_training_evaluation_time(train_times, eval_times)
-    plot_confusion_matrix(val_labels, val_preds, classes)
+    plot_confusion_matrix(val_labels, val_preds, classes=[
+                          str(i) for i in range(num_classes)])
     plot_roc_auc(val_labels, val_preds, num_classes)
 
+    # Generate classification report
     print("Classification Report:")
     print(classification_report(val_labels, val_preds,
-          target_names=[str(c) for c in classes]))
+          target_names=[str(i) for i in range(num_classes)]))
+
+    print("Training complete.")
 
 
 if __name__ == "__main__":
