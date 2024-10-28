@@ -1,4 +1,3 @@
-# Importing necessary libraries
 import pandas as pd
 import numpy as np
 import torch
@@ -7,51 +6,26 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
+from sklearn.preprocessing import StandardScaler, label_binarize
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import (
+    classification_report,
+    accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    confusion_matrix,
+    ConfusionMatrixDisplay,
+    roc_curve,
+    auc
+)
 import matplotlib.pyplot as plt
 import time
-from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import ConfusionMatrixDisplay
-
-
-class CNNModel(nn.Module):
-    def __init__(self, input_dim, num_classes):
-        super(CNNModel, self).__init__()
-        self.conv1 = nn.Conv1d(
-            in_channels=1, out_channels=64, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm1d(64)
-        self.pool = nn.MaxPool1d(2)
-        self.conv2 = nn.Conv1d(
-            in_channels=64, out_channels=128, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm1d(128)
-
-        self.fc1_input_dim = 128 * (input_dim // 4)
-        self.fc1 = nn.Linear(self.fc1_input_dim, 256)
-        self.fc2 = nn.Linear(256, num_classes)
-        self.dropout = nn.Dropout(0.5)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = torch.relu(x)
-        x = self.pool(x)
-
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = torch.relu(x)
-        x = self.pool(x)
-
-        x = x.view(x.size(0), -1)
-        x = self.dropout(torch.relu(self.fc1(x)))
-        x = self.fc2(x)
-        return x
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2, reduction='mean'):
+    def __init__(self, alpha=1, gamma=2, reduction='mean'):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -60,21 +34,17 @@ class FocalLoss(nn.Module):
     def forward(self, inputs, targets):
         BCE_loss = nn.CrossEntropyLoss(reduction='none')(inputs, targets)
         pt = torch.exp(-BCE_loss)
-        F_loss = (1 - pt) ** self.gamma * BCE_loss
-
-        if self.alpha is not None:
-            alpha_t = self.alpha[targets]
-            F_loss = alpha_t * F_loss
+        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
 
         if self.reduction == 'mean':
-            return F_loss.mean()
+            return torch.mean(F_loss)
         elif self.reduction == 'sum':
-            return F_loss.sum()
+            return torch.sum(F_loss)
         else:
             return F_loss
 
 
-def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
+def load_and_preprocess_data(root, apply_log_transform=True):
     NB15_1 = pd.read_csv(root + 'UNSW-NB15_1.csv', low_memory=False)
     NB15_2 = pd.read_csv(root + 'UNSW-NB15_2.csv', low_memory=False)
     NB15_3 = pd.read_csv(root + 'UNSW-NB15_3.csv', low_memory=False)
@@ -98,16 +68,17 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
         'backdoors', 'backdoor')
 
     label_mapping = {
-        'normal': 6, 'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
-        'fuzzers': 4, 'generic': 5, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
+        'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
+        'fuzzers': 4, 'generic': 5, 'normal': 6, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
     }
     train_df['attack_cat'] = train_df['attack_cat'].map(label_mapping)
     train_df = train_df.dropna(subset=['attack_cat'])
     train_df['attack_cat'] = train_df['attack_cat'].astype(int)
 
     numeric_cols = [
-        'sport', 'dsport', 'ct_ftp_cmd', 'Ltime', 'Stime', 'sbytes', 'dbytes', 'Spkts',
-        'Dpkts', 'Sload', 'Dload', 'Sjit', 'Djit', 'tcprtt', 'synack', 'ackdat'
+        'sport', 'dsport', 'ct_ftp_cmd', 'Ltime', 'Stime', 'sbytes', 'dbytes',
+        'Spkts', 'Dpkts', 'Sload', 'Dload', 'Sjit', 'Djit',
+        'tcprtt', 'synack', 'ackdat'
     ]
     for col in numeric_cols:
         train_df[col] = pd.to_numeric(train_df[col], errors='coerce')
@@ -127,8 +98,10 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     train_df['tcp_setup_ratio'] = train_df['tcprtt'] / \
         (train_df['synack'] + train_df['ackdat'] + 1)
 
-    columns_to_drop = ['sport', 'dsport', 'proto',
-                       'srcip', 'dstip', 'state', 'service', 'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime']
+    columns_to_drop = [
+        'sport', 'dsport', 'proto', 'srcip', 'dstip', 'state', 'service',
+        'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime'
+    ]
     train_df = train_df.drop(columns=columns_to_drop, errors='ignore')
 
     X = train_df.drop(['attack_cat'], axis=1)
@@ -140,71 +113,102 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     X, y = X[mask], y[mask]
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y)
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
 
-    scaler_dict = {
-        'standard': StandardScaler(),
-        'minmax': MinMaxScaler(),
-        'robust': RobustScaler()
-    }
-    scaler = scaler_dict.get(scaler_choice, StandardScaler())
+    scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
-
     return X_train_scaled, X_test_scaled, y_train, y_test
+
+
+class CNNClassifier(nn.Module):
+    def __init__(self, input_dim, num_classes):
+        super(CNNClassifier, self).__init__()
+        self.layer1 = nn.Sequential(
+            nn.Conv1d(1, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm1d(32)
+        )
+        self.layer2 = nn.Sequential(
+            nn.Conv1d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm1d(64)
+        )
+        self.fc = nn.Sequential(
+            nn.Linear(64 * input_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(128, num_classes)
+        )
+
+    def forward(self, x):
+        x = x.unsqueeze(1)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = x.view(x.size(0), -1)
+        logits = self.fc(x)
+        return logits
 
 
 def train_epoch(model, train_loader, optimizer, criterion, device):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
+    all_preds, all_labels = [], []
+    start_time = time.time()
 
     for inputs, labels in train_loader:
         inputs, labels = inputs.to(device), labels.to(device)
-
         optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
+
+        logits = model(inputs)
+        loss = criterion(logits, labels)
+
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item()
-        _, predicted = torch.max(outputs, 1)
+        _, predicted = torch.max(logits, 1)
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
 
-    accuracy = correct / total
-    return total_loss / len(train_loader), accuracy
+        all_preds.extend(predicted.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+
+    end_time = time.time()
+    epoch_time = (end_time - start_time) / 60
+    train_accuracy = correct / total
+    return total_loss / len(train_loader), train_accuracy, epoch_time, all_preds, all_labels
 
 
 def validate_epoch(model, test_loader, criterion, device):
     model.eval()
     val_loss, correct, total = 0.0, 0, 0
     all_preds, all_labels = [], []
+    start_time = time.time()
 
     with torch.no_grad():
         for inputs, labels in test_loader:
             inputs, labels = inputs.to(device), labels.to(device)
+            logits = model(inputs)
+            loss = criterion(logits, labels)
 
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
             val_loss += loss.item()
-
-            _, predicted = torch.max(outputs, 1)
+            _, predicted = torch.max(logits, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
-    accuracy = correct / total
-    return val_loss / len(test_loader), accuracy, all_preds, all_labels
-
-# Plot Accuracy & Loss
+    end_time = time.time()
+    eval_time = end_time - start_time
+    val_accuracy = correct / total
+    return val_loss / len(test_loader), val_accuracy, eval_time, all_preds, all_labels
 
 
 def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losses):
     epochs = np.arange(1, len(train_accuracies) + 1)
-
     plt.figure(figsize=(8, 6))
     plt.plot(epochs, train_accuracies, label='Training Accuracy', color='blue')
     plt.plot(epochs, val_accuracies,
@@ -214,7 +218,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Accuracy')
     plt.legend()
     plt.grid(True)
-    plt.savefig('CNN_accuracy.png')
+    plt.savefig('cnn_accuracy.png')
     plt.show()
 
     plt.figure(figsize=(8, 6))
@@ -225,33 +229,28 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid(True)
-    plt.savefig('CNN_loss.png')
+    plt.savefig('cnn_loss.png')
     plt.show()
 
 
 def plot_training_evaluation_time(train_times, eval_times):
     epochs = np.arange(1, len(train_times) + 1)
     fig, ax1 = plt.subplots(figsize=(8, 6))
-
     color = 'tab:blue'
     ax1.set_xlabel('Epochs')
     ax1.set_ylabel('Training Time (minutes)', color=color)
     ax1.plot(epochs, train_times, label='Training Time', color=color)
     ax1.tick_params(axis='y', labelcolor=color)
-
     ax2 = ax1.twinx()
     color = 'tab:red'
     ax2.set_ylabel('Evaluation Time (seconds)', color=color)
     ax2.plot(epochs, eval_times, label='Evaluation Time', color=color)
     ax2.tick_params(axis='y', labelcolor=color)
-
     plt.title("Training and Evaluation Time per Epoch")
-    fig.tight_layout()  # to avoid overlap
+    fig.tight_layout()
     plt.grid(True)
-    plt.savefig('CNN_train_evaluation_time.png')
+    plt.savefig('cnn_train_evaluation_time.png')
     plt.show()
-
-# Plot Confusion Matrix
 
 
 def plot_confusion_matrix(y_true, y_pred, classes):
@@ -261,19 +260,15 @@ def plot_confusion_matrix(y_true, y_pred, classes):
     disp.plot(cmap=plt.cm.Blues, values_format='d')
     plt.title('Confusion Matrix')
     plt.grid(False)
-    plt.savefig('CNN_confusion_matrix.png')
+    plt.savefig('cnn_confusion_matrix.png')
     plt.show()
-
-# Plot ROC-AUC Curves
 
 
 def plot_roc_auc(y_true, y_pred, num_classes):
     y_true_bin = label_binarize(y_true, classes=np.arange(num_classes))
     y_pred_bin = label_binarize(y_pred, classes=np.arange(num_classes))
-
     fpr_micro, tpr_micro, _ = roc_curve(y_true_bin.ravel(), y_pred_bin.ravel())
     roc_auc_micro = auc(fpr_micro, tpr_micro)
-
     fpr = dict()
     tpr = dict()
     roc_auc = dict()
@@ -284,35 +279,39 @@ def plot_roc_auc(y_true, y_pred, num_classes):
     plt.figure(figsize=(8, 6))
     plt.plot(fpr_micro, tpr_micro, color='blue',
              label=f'Micro-AUC = {roc_auc_micro:.4f}')
-
     for i in range(num_classes):
         plt.plot(fpr[i], tpr[i], label=f'Class {i} AUC = {roc_auc[i]:.4f}')
-
     plt.plot([0, 1], [0, 1], linestyle='--', color='grey')
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
     plt.title('ROC-AUC Curves')
     plt.legend(loc='best')
     plt.grid(True)
-    plt.savefig('CNN_roc_auc.png')
+    plt.savefig('cnn_roc_auc.png')
     plt.show()
 
 
 def main():
     root = "data/"
     batch_size = 512
-    num_epochs = 100
-    learning_rate = 1e-4
+    num_epochs = 300
+    learning_rate = 1e-3
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load và tiền xử lý dữ liệu
-    X_train, X_test, y_train, y_test = load_and_preprocess_data(root)
-    X_train_tensor = torch.tensor(X_train, dtype=torch.float32).unsqueeze(1)
-    y_train_tensor = torch.tensor(y_train.values, dtype=torch.long)
-    y_test_tensor = torch.tensor(y_test.values, dtype=torch.long)
-    X_test_tensor = torch.tensor(X_test, dtype=torch.float32).unsqueeze(1)
+    X_train_scaled, X_test_scaled, y_train, y_test = load_and_preprocess_data(
+        root)
 
-    # Tạo TensorDataset và DataLoader
+    classes = sorted(np.unique(y_train))
+    num_classes = len(classes)
+    label_encoder = LabelEncoder()
+    y_train_enc = label_encoder.fit_transform(y_train)
+    y_test_enc = label_encoder.transform(y_test)
+
+    X_train_tensor = torch.tensor(X_train_scaled, dtype=torch.float32)
+    y_train_tensor = torch.tensor(y_train_enc, dtype=torch.long)
+    X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32)
+    y_test_tensor = torch.tensor(y_test_enc, dtype=torch.long)
+
     train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
     test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
     train_loader = DataLoader(
@@ -320,63 +319,52 @@ def main():
     test_loader = DataLoader(
         test_dataset, batch_size=batch_size, shuffle=False)
 
-    input_dim = X_train.shape[1]
-    num_classes = len(np.unique(y_train))
-    model = CNNModel(input_dim=input_dim, num_classes=num_classes).to(device)
-
-    # Khởi tạo optimizer và Focal Loss
+    input_dim = X_train_scaled.shape[1]
+    model = CNNClassifier(input_dim=input_dim,
+                          num_classes=num_classes).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    class_weights = compute_class_weight(
-        'balanced', classes=np.unique(y_train), y=y_train)
-    class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
-    criterion = FocalLoss(alpha=class_weights, gamma=2)
+    criterion = FocalLoss(alpha=1, gamma=2)
 
     train_accuracies, val_accuracies = [], []
     train_losses, val_losses = [], []
     train_times, eval_times = [], []
 
-    for epoch in range(num_epochs):
-        start_time = time.time()
+    total_start_time = time.time()
 
-        # Huấn luyện mô hình
-        train_loss, train_acc = train_epoch(
-            model, train_loader, optimizer, criterion, device)
-        train_time = (time.time() - start_time) / \
-            60  # Tính thời gian huấn luyện
+    for epoch in range(1, num_epochs + 1):
+        train_loss, train_acc, train_time, train_preds, train_labels = train_epoch(
+            model, train_loader, optimizer, criterion, device
+        )
 
-        # Đánh giá mô hình
-        eval_start_time = time.time()
-        val_loss, val_acc, val_preds, val_labels = validate_epoch(
-            model, test_loader, criterion, device)
-        eval_time = time.time() - eval_start_time  # Tính thời gian đánh giá
+        val_loss, val_acc, eval_time, val_preds, val_labels = validate_epoch(
+            model, test_loader, criterion, device
+        )
 
-        # Lưu kết quả
-        train_accuracies.append(train_acc)
-        val_accuracies.append(val_acc)
         train_losses.append(train_loss)
         val_losses.append(val_loss)
+        train_accuracies.append(train_acc)
+        val_accuracies.append(val_acc)
         train_times.append(train_time)
         eval_times.append(eval_time)
 
-        # In ra kết quả từng epoch
-        print(f"Epoch {epoch + 1}/{num_epochs} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
-              f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Train Time: {train_time:.2f} minutes | Eval Time: {eval_time:.2f} seconds")
+        print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
+              f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
+              f"Val Acc: {val_acc:.4f} | Training Time: {
+                  train_time:.2f} mins | "
+              f"Evaluation Time: {eval_time:.2f} secs")
 
-    # Vẽ biểu đồ kết quả sau huấn luyện
+    total_time = (time.time() - total_start_time) / 60
+    print(f"Total Training Time: {total_time:.2f} minutes")
+
     plot_accuracy_loss(train_accuracies, val_accuracies,
                        train_losses, val_losses)
-
-    # Vẽ biểu đồ thời gian huấn luyện và đánh giá
     plot_training_evaluation_time(train_times, eval_times)
-
-    # Vẽ confusion matrix và ROC-AUC
-    classes = [str(i) for i in np.unique(y_train)]
     plot_confusion_matrix(val_labels, val_preds, classes)
     plot_roc_auc(val_labels, val_preds, num_classes)
 
-    # In Classification Report
     print("Classification Report:")
-    print(classification_report(val_labels, val_preds, target_names=classes))
+    print(classification_report(val_labels, val_preds,
+          target_names=[str(c) for c in classes]))
 
 
 if __name__ == "__main__":

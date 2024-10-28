@@ -7,12 +7,20 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
+from sklearn.preprocessing import StandardScaler, label_binarize
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc, ConfusionMatrixDisplay
+from sklearn.metrics import (
+    classification_report,
+    accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    confusion_matrix,
+    ConfusionMatrixDisplay,
+    roc_curve,
+    auc
+)
 import matplotlib.pyplot as plt
-from imblearn.over_sampling import RandomOverSampler
-from sklearn.preprocessing import LabelEncoder
 import time
 
 
@@ -37,19 +45,24 @@ class FocalLoss(nn.Module):
 
 
 class Autoencoder(nn.Module):
-    def __init__(self, input_dim, encoding_dim=64):
+    def __init__(self, input_dim, encoding_dim=512, dropout_rate=0.5):
         super(Autoencoder, self).__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, encoding_dim),
-            nn.ReLU(True),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(encoding_dim),
+            nn.Dropout(dropout_rate),
             nn.Linear(encoding_dim, encoding_dim // 2),
-            nn.ReLU(True)
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(encoding_dim // 2),
+            nn.Dropout(dropout_rate)
         )
         self.decoder = nn.Sequential(
             nn.Linear(encoding_dim // 2, encoding_dim),
-            nn.ReLU(True),
+            nn.LeakyReLU(0.2),
+            nn.BatchNorm1d(encoding_dim),
+            nn.Dropout(dropout_rate),
             nn.Linear(encoding_dim, input_dim),
-            nn.Sigmoid()
         )
 
     def forward(self, x):
@@ -58,7 +71,7 @@ class Autoencoder(nn.Module):
         return decoded
 
 
-def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
+def load_and_preprocess_data(root, apply_log_transform=True):
     NB15_1 = pd.read_csv(root + 'UNSW-NB15_1.csv', low_memory=False)
     NB15_2 = pd.read_csv(root + 'UNSW-NB15_2.csv', low_memory=False)
     NB15_3 = pd.read_csv(root + 'UNSW-NB15_3.csv', low_memory=False)
@@ -82,8 +95,8 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
         'backdoors', 'backdoor')
 
     label_mapping = {
-        'normal': 6, 'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
-        'fuzzers': 4, 'generic': 5, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
+        'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
+        'fuzzers': 4, 'generic': 5, 'normal': 6, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
     }
     train_df['attack_cat'] = train_df['attack_cat'].map(label_mapping)
     train_df = train_df.dropna(subset=['attack_cat'])
@@ -118,12 +131,7 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y)
 
-    scaler_dict = {
-        'standard': StandardScaler(),
-        'minmax': MinMaxScaler(),
-        'robust': RobustScaler()
-    }
-    scaler = scaler_dict.get(scaler_choice, StandardScaler())
+    scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
@@ -200,7 +208,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Accuracy')
     plt.legend()
     plt.grid(True)
-    plt.savefig('transformer_accuracy.png')
+    plt.savefig('AutoEncoder_accuracy.png')
     plt.show()
 
     plt.figure(figsize=(8, 6))
@@ -211,7 +219,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid(True)
-    plt.savefig('transformer_loss.png')
+    plt.savefig('AutoEncoder_loss.png')
     plt.show()
 
 
@@ -232,9 +240,9 @@ def plot_training_evaluation_time(train_times, eval_times):
     ax2.tick_params(axis='y', labelcolor=color)
 
     plt.title("Training and Evaluation Time per Epoch")
-    fig.tight_layout()  # to avoid overlap
+    fig.tight_layout()
     plt.grid(True)
-    plt.savefig('transformer_train_evaluation_time.png')
+    plt.savefig('AutoEncoder_train_evaluation_time.png')
     plt.show()
 
 
@@ -245,7 +253,7 @@ def plot_confusion_matrix(y_true, y_pred, classes):
     disp.plot(cmap=plt.cm.Blues, values_format='d')
     plt.title('Confusion Matrix')
     plt.grid(False)
-    plt.savefig('transformer_confusion_matrix.png')
+    plt.savefig('AutoEncoder_confusion_matrix.png')
     plt.show()
 
 
@@ -266,31 +274,28 @@ def plot_roc_auc(y_true, y_pred, num_classes):
     plt.figure(figsize=(8, 6))
     plt.plot(fpr_micro, tpr_micro, color='blue',
              label=f'Micro-AUC = {roc_auc_micro:.4f}')
-
     for i in range(num_classes):
         plt.plot(fpr[i], tpr[i], label=f'Class {i} AUC = {roc_auc[i]:.4f}')
-
     plt.plot([0, 1], [0, 1], linestyle='--', color='grey')
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
     plt.title('ROC-AUC Curves')
     plt.legend(loc='best')
     plt.grid(True)
-    plt.savefig('transformer_roc_auc.png')
+    plt.savefig('AutoEncoder_roc_auc.png')
     plt.show()
 
 
 def main():
     root = "data/"
     batch_size = 512
-    num_epochs = 100
-    learning_rate = 1e-4
-    weight_decay = 1e-5
+    num_epochs = 300
+    learning_rate = 1e-3
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     X_train, X_test, y_train, y_test = load_and_preprocess_data(root)
 
-    classes = sorted(y_train.unique())
+    classes = sorted(np.unique(y_train))
     num_classes = len(classes)
     label_encoder = LabelEncoder()
     y_train_enc = label_encoder.fit_transform(y_train)
@@ -309,14 +314,10 @@ def main():
         test_dataset, batch_size=batch_size, shuffle=False)
 
     input_dim = X_train.shape[1]
-    model = Autoencoder(
-        input_dim=input_dim, num_classes=num_classes).to(device)
-    optimizer = optim.AdamW(
-        model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=10, T_mult=2, eta_min=1e-6)
+    model = Autoencoder(input_dim=input_dim).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = FocalLoss(alpha=1, gamma=2)
-    scaler_fp16 = torch.cuda.amp.GradScaler()
+    scaler = torch.cuda.amp.GradScaler()
 
     train_accuracies, val_accuracies = [], []
     train_losses, val_losses = [], []
@@ -325,23 +326,22 @@ def main():
     total_start_time = time.time()
 
     for epoch in range(1, num_epochs + 1):
-        train_loss, train_acc, train_time, train_preds, train_labels = train_epoch(
-            model, train_loader, optimizer, criterion, scaler_fp16, device)
-
-        val_loss, val_acc, eval_time, val_preds, val_labels = validate_epoch(
+        train_loss, train_accuracy, epoch_time, train_preds, train_labels = train_epoch(
+            model, train_loader, optimizer, criterion, scaler, device)
+        val_loss, val_accuracy, eval_time, val_preds, val_labels = validate_epoch(
             model, test_loader, criterion, device)
 
-        scheduler.step()
-        train_accuracies.append(train_acc)
-        val_accuracies.append(val_acc)
+        train_accuracies.append(train_accuracy)
+        val_accuracies.append(val_accuracy)
         train_losses.append(train_loss)
         val_losses.append(val_loss)
-        train_times.append(train_time)
+        train_times.append(epoch_time)
         eval_times.append(eval_time)
 
         print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
-              f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_acc:.4f} | Time: {train_time:.2f} minutes")
+              f"Train Acc: {train_accuracy:.4f} | Val Loss: {val_loss:.4f} | "
+              f"Val Acc: {val_accuracy:.4f} | "
+              f"Training Time: {epoch_time:.2f} minutes | Evaluation Time: {eval_time:.2f} seconds")
 
     total_time = (time.time() - total_start_time) / 60
     print(f"Total Training Time: {total_time:.2f} minutes")
@@ -353,8 +353,8 @@ def main():
     plot_roc_auc(val_labels, val_preds, num_classes)
 
     print("Classification Report:")
-    print(classification_report(val_labels, val_preds,
-          target_names=[str(c) for c in classes]))
+    print(classification_report(val_labels, val_preds, target_names=[
+        str(c) for c in classes], digits=4))
 
 
 if __name__ == "__main__":

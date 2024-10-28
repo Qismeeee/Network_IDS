@@ -3,12 +3,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
+from sklearn.preprocessing import StandardScaler, label_binarize
 from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import precision_score, recall_score, f1_score
 from sklearn.metrics import (
     classification_report,
     accuracy_score,
@@ -22,11 +23,6 @@ from sklearn.metrics import (
 )
 import matplotlib.pyplot as plt
 import time
-from sklearn.preprocessing import LabelEncoder
-from imblearn.over_sampling import RandomOverSampler
-from sklearn.utils.class_weight import compute_class_weight
-
-# Focal Loss Definition
 
 
 class FocalLoss(nn.Module):
@@ -48,10 +44,8 @@ class FocalLoss(nn.Module):
         else:
             return F_loss
 
-# Data Preprocessing Function
 
-
-def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
+def load_and_preprocess_data(root, apply_log_transform=True):
     NB15_1 = pd.read_csv(root + 'UNSW-NB15_1.csv', low_memory=False)
     NB15_2 = pd.read_csv(root + 'UNSW-NB15_2.csv', low_memory=False)
     NB15_3 = pd.read_csv(root + 'UNSW-NB15_3.csv', low_memory=False)
@@ -75,16 +69,17 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
         'backdoors', 'backdoor')
 
     label_mapping = {
-        'normal': 6, 'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
-        'fuzzers': 4, 'generic': 5, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
+        'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
+        'fuzzers': 4, 'generic': 5, 'normal': 6, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
     }
     train_df['attack_cat'] = train_df['attack_cat'].map(label_mapping)
     train_df = train_df.dropna(subset=['attack_cat'])
     train_df['attack_cat'] = train_df['attack_cat'].astype(int)
 
     numeric_cols = [
-        'sport', 'dsport', 'ct_ftp_cmd', 'Ltime', 'Stime', 'sbytes', 'dbytes', 'Spkts',
-        'Dpkts', 'Sload', 'Dload', 'Sjit', 'Djit', 'tcprtt', 'synack', 'ackdat'
+        'sport', 'dsport', 'ct_ftp_cmd', 'Ltime', 'Stime', 'sbytes', 'dbytes',
+        'Spkts', 'Dpkts', 'Sload', 'Dload', 'Sjit', 'Djit',
+        'tcprtt', 'synack', 'ackdat'
     ]
     for col in numeric_cols:
         train_df[col] = pd.to_numeric(train_df[col], errors='coerce')
@@ -104,8 +99,10 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     train_df['tcp_setup_ratio'] = train_df['tcprtt'] / \
         (train_df['synack'] + train_df['ackdat'] + 1)
 
-    columns_to_drop = ['sport', 'dsport', 'proto',
-                       'srcip', 'dstip', 'state', 'service', 'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime']
+    columns_to_drop = [
+        'sport', 'dsport', 'proto', 'srcip', 'dstip', 'state', 'service',
+        'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime'
+    ]
     train_df = train_df.drop(columns=columns_to_drop, errors='ignore')
 
     X = train_df.drop(['attack_cat'], axis=1)
@@ -117,107 +114,97 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     X, y = X[mask], y[mask]
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y)
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
 
-    scaler_dict = {
-        'standard': StandardScaler(),
-        'minmax': MinMaxScaler(),
-        'robust': RobustScaler()
-    }
-    scaler = scaler_dict.get(scaler_choice, StandardScaler())
+    scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
-
     return X_train_scaled, X_test_scaled, y_train, y_test
 
 
 class BiLSTMClassifier(nn.Module):
-    def __init__(self, input_dim, num_classes, hidden_dim=128, num_layers=2, dropout=0.1):
+    def __init__(self, input_dim, hidden_dim, num_layers, num_classes, dropout=0.5):
         super(BiLSTMClassifier, self).__init__()
-        self.embedding = nn.Linear(input_dim, hidden_dim)
-        self.lstm = nn.LSTM(
-            input_size=hidden_dim,
+        self.bilstm = nn.LSTM(
+            input_size=input_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
-            dropout=dropout,
             batch_first=True,
+            dropout=dropout,
             bidirectional=True
         )
-        self.dropout = nn.Dropout(dropout)
-        # Multiply by 2 for bidirectional
         self.fc = nn.Linear(hidden_dim * 2, num_classes)
-        self.layer_norm = nn.LayerNorm(hidden_dim * 2)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        # (batch_size, seq_len=1, hidden_dim)
-        x = self.embedding(x).unsqueeze(1)
-        lstm_out, _ = self.lstm(x)  # (batch_size, seq_len, hidden_dim * 2)
-        x = torch.mean(lstm_out, dim=1)  # (batch_size, hidden_dim * 2)
-        x = self.layer_norm(x)  # Apply LayerNorm here
-        x = self.dropout(x)
-        logits = self.fc(x)  # Final output
+        x = x.unsqueeze(1)
+        h_lstm, _ = self.bilstm(x)
+        h_lstm = h_lstm[:, -1, :]
+        h_lstm = self.dropout(h_lstm)
+        logits = self.fc(h_lstm)
         return logits
 
 
-# Training Function
-def train_epoch(model, train_loader, optimizer, criterion, scaler, device):
+def train_epoch(model, train_loader, optimizer, criterion, device):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
-    all_preds, all_labels = [], []
     start_time = time.time()
 
     for inputs, labels in train_loader:
         inputs, labels = inputs.to(device), labels.to(device)
         optimizer.zero_grad()
 
-        with torch.cuda.amp.autocast(enabled=scaler is not None):
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+        logits = model(inputs)
+        loss = criterion(logits, labels)
 
         loss.backward()
         optimizer.step()
 
         total_loss += loss.item()
-        _, predicted = torch.max(outputs, 1)
-        correct += (predicted == labels).sum().item()
+        _, predicted = torch.max(logits, 1)
         total += labels.size(0)
-        all_preds.extend(predicted.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
+        correct += (predicted == labels).sum().item()
 
-    accuracy = correct / total
-    avg_loss = total_loss / len(train_loader)
-    elapsed_time = time.time() - start_time
-    return avg_loss, accuracy, elapsed_time, all_preds, all_labels
-
-# Evaluation Function
+    end_time = time.time()
+    epoch_time = (end_time - start_time) / 60
+    train_accuracy = correct / total
+    return total_loss / len(train_loader), train_accuracy, epoch_time
 
 
-def evaluate_model(model, test_loader, criterion, device):
+def validate_epoch(model, test_loader, criterion, device):
     model.eval()
-    total_loss, correct, total = 0.0, 0, 0
+    val_loss, correct, total = 0.0, 0, 0
     all_preds, all_labels = [], []
-    start_time = time.time()  # Start time for evaluation
+    start_time = time.time()
 
     with torch.no_grad():
         for inputs, labels in test_loader:
             inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            logits = model(inputs)
+            loss = criterion(logits, labels)
 
-            total_loss += loss.item()
-            _, predicted = torch.max(outputs, 1)
-            correct += (predicted == labels).sum().item()
+            val_loss += loss.item()
+            _, predicted = torch.max(logits, 1)
             total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
-    accuracy = correct / total
-    avg_loss = total_loss / len(test_loader)
-    elapsed_time = time.time() - start_time  # Calculate evaluation time
-    return avg_loss, accuracy, elapsed_time, all_preds, all_labels
+    end_time = time.time()
+    eval_time = end_time - start_time
+    val_accuracy = correct / total
+
+    precision = precision_score(
+        all_labels, all_preds, average='weighted', zero_division=1)
+    recall = recall_score(all_labels, all_preds,
+                          average='weighted', zero_division=1)
+    f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=1)
+
+    return val_loss / len(test_loader), val_accuracy, eval_time, all_preds, all_labels, precision, recall, f1
 
 
-# Plot Accuracy & Loss
 def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losses):
     epochs = np.arange(1, len(train_accuracies) + 1)
 
@@ -230,7 +217,7 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Accuracy')
     plt.legend()
     plt.grid(True)
-    plt.savefig('BiLSTM_accuracy.png')
+    plt.savefig('bilstm_accuracy.png')
     plt.show()
 
     plt.figure(figsize=(8, 6))
@@ -241,10 +228,8 @@ def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losse
     plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid(True)
-    plt.savefig('BiLSTM_loss.png')
+    plt.savefig('bilstm_loss.png')
     plt.show()
-
-# Plot Training & Evaluation Time
 
 
 def plot_training_evaluation_time(train_times, eval_times):
@@ -264,12 +249,10 @@ def plot_training_evaluation_time(train_times, eval_times):
     ax2.tick_params(axis='y', labelcolor=color)
 
     plt.title("Training and Evaluation Time per Epoch")
-    fig.tight_layout()  # to avoid overlap
+    fig.tight_layout()
     plt.grid(True)
-    plt.savefig('BiLSTM_train_evaluation_time.png')
+    plt.savefig('bilstm_train_evaluation_time.png')
     plt.show()
-
-# Plot Confusion Matrix
 
 
 def plot_confusion_matrix(y_true, y_pred, classes):
@@ -279,10 +262,8 @@ def plot_confusion_matrix(y_true, y_pred, classes):
     disp.plot(cmap=plt.cm.Blues, values_format='d')
     plt.title('Confusion Matrix')
     plt.grid(False)
-    plt.savefig('BiLSTM_confusion_matrix.png')
+    plt.savefig('bilstm_confusion_matrix.png')
     plt.show()
-
-# Plot ROC-AUC Curves
 
 
 def plot_roc_auc(y_true, y_pred, num_classes):
@@ -302,84 +283,99 @@ def plot_roc_auc(y_true, y_pred, num_classes):
     plt.figure(figsize=(8, 6))
     plt.plot(fpr_micro, tpr_micro, color='blue',
              label=f'Micro-AUC = {roc_auc_micro:.4f}')
-
     for i in range(num_classes):
         plt.plot(fpr[i], tpr[i], label=f'Class {i} AUC = {roc_auc[i]:.4f}')
-
     plt.plot([0, 1], [0, 1], linestyle='--', color='grey')
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
     plt.title('ROC-AUC Curves')
     plt.legend(loc='best')
     plt.grid(True)
-    plt.savefig('BiLSTM_roc_auc.png')
+    plt.savefig('bilstm_roc_auc.png')
     plt.show()
 
 
 def main():
-    root = 'data/'
-    batch_size = 64
-    num_epochs = 1
-    learning_rate = 0.001
-    scaler_choice = 'standard'
+    root = "data/"
+    batch_size = 512
+    num_epochs = 300
+    learning_rate = 1e-3
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    X_train, X_test, y_train, y_test = load_and_preprocess_data(root)
 
-    X_train_scaled, X_test_scaled, y_train, y_test = load_and_preprocess_data(
-        root, scaler_choice)
+    classes = sorted(np.unique(y_train))
+    num_classes = len(classes)
+    label_encoder = LabelEncoder()
+    y_train_enc = label_encoder.fit_transform(y_train)
+    y_test_enc = label_encoder.transform(y_test)
 
-    input_dim = X_train_scaled.shape[1]
-    num_classes = 10
-    classes = ['analysis', 'backdoor', 'dos', 'exploits', 'fuzzers',
-               'generic', 'normal', 'reconnaissance', 'shellcode', 'worms']
+    X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
+    y_train_tensor = torch.tensor(y_train_enc, dtype=torch.long)
+    X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
+    y_test_tensor = torch.tensor(y_test_enc, dtype=torch.long)
 
-    train_dataset = TensorDataset(torch.tensor(X_train_scaled, dtype=torch.float32),
-                                  torch.tensor(y_train.values, dtype=torch.long))
-    test_dataset = TensorDataset(torch.tensor(X_test_scaled, dtype=torch.float32),
-                                 torch.tensor(y_test.values, dtype=torch.long))
-
+    train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+    test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True)
     test_loader = DataLoader(
         test_dataset, batch_size=batch_size, shuffle=False)
 
+    input_dim = X_train.shape[1]
     model = BiLSTMClassifier(
-        input_dim=input_dim, num_classes=num_classes).to(device)
+        input_dim=input_dim,
+        hidden_dim=128,
+        num_layers=2,
+        num_classes=num_classes,
+        dropout=0.5
+    ).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = FocalLoss()
+    criterion = FocalLoss(alpha=1, gamma=2)
 
-    # Initialize lists to store metrics
-    train_accuracies = []
-    val_accuracies = []
-    train_losses = []
-    val_losses = []
-    train_times = []
-    eval_times = []
+    train_accuracies, val_accuracies = [], []
+    train_losses, val_losses = [], []
+    train_times, eval_times = [], []
 
     total_start_time = time.time()
+
     for epoch in range(1, num_epochs + 1):
-        train_loss, train_accuracy, train_time, train_preds, train_labels = train_epoch(
-            model, train_loader, optimizer, criterion, None, device
+        train_loss, train_acc, train_time = train_epoch(
+            model, train_loader, optimizer, criterion, device
         )
-        val_loss, val_accuracy, eval_time, val_preds, val_labels = evaluate_model(
+
+        val_loss, val_acc, eval_time, val_preds, val_labels, precision, recall, f1 = validate_epoch(
             model, test_loader, criterion, device
         )
 
-        train_accuracies.append(train_accuracy)
-        val_accuracies.append(val_accuracy)
         train_losses.append(train_loss)
         val_losses.append(val_loss)
+        train_accuracies.append(train_acc)
+        val_accuracies.append(val_acc)
         train_times.append(train_time)
         eval_times.append(eval_time)
 
         print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
-              f"Train Acc: {train_accuracy:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_accuracy:.4f} | Train Time: {
-                  train_time:.2f} seconds | "
-              f"Eval Time: {eval_time:.2f} seconds")
+              f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
+              f"Val Acc: {val_acc:.4f} | Precision: {
+                  precision:.4f} | Recall: {recall:.4f} | "
+              f"F1-score: {f1:.4f} | Training Time: {train_time:.2f} mins | "
+              f"Evaluation Time: {eval_time:.2f} secs")
 
     total_time = (time.time() - total_start_time) / 60
     print(f"Total Training Time: {total_time:.2f} minutes")
+
+    final_precision = precision_score(
+        val_labels, val_preds, average='weighted', zero_division=1)
+    final_recall = recall_score(
+        val_labels, val_preds, average='weighted', zero_division=1)
+    final_f1 = f1_score(val_labels, val_preds,
+                        average='weighted', zero_division=1)
+
+    print(f"Final Total Accuracy: {val_acc:.4f}")
+    print(f"Final Precision: {final_precision:.4f}")
+    print(f"Final Recall: {final_recall:.4f}")
+    print(f"Final F1-score: {final_f1:.4f}")
 
     plot_accuracy_loss(train_accuracies, val_accuracies,
                        train_losses, val_losses)
@@ -388,10 +384,9 @@ def main():
     plot_roc_auc(val_labels, val_preds, num_classes)
 
     print("Classification Report:")
-    print(classification_report(val_labels, val_preds, target_names=classes))
-    print("Confusion Matrix:")
-    ConfusionMatrixDisplay(confusion_matrix(val_labels, val_preds)).plot()
+    print(classification_report(val_labels, val_preds,
+          target_names=[str(c) for c in classes]))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

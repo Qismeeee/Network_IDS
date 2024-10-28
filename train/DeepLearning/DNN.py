@@ -6,7 +6,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
+from sklearn.preprocessing import StandardScaler, label_binarize
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.metrics import (
@@ -22,11 +22,6 @@ from sklearn.metrics import (
 )
 import matplotlib.pyplot as plt
 import time
-from sklearn.preprocessing import LabelEncoder
-from imblearn.over_sampling import RandomOverSampler
-from sklearn.utils.class_weight import compute_class_weight
-
-# Focal Loss Definition
 
 
 class FocalLoss(nn.Module):
@@ -48,10 +43,8 @@ class FocalLoss(nn.Module):
         else:
             return F_loss
 
-# Data Preprocessing Function
 
-
-def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
+def load_and_preprocess_data(root, apply_log_transform=True):
     NB15_1 = pd.read_csv(root + 'UNSW-NB15_1.csv', low_memory=False)
     NB15_2 = pd.read_csv(root + 'UNSW-NB15_2.csv', low_memory=False)
     NB15_3 = pd.read_csv(root + 'UNSW-NB15_3.csv', low_memory=False)
@@ -75,16 +68,17 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
         'backdoors', 'backdoor')
 
     label_mapping = {
-        'normal': 6, 'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
-        'fuzzers': 4, 'generic': 5, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
+        'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
+        'fuzzers': 4, 'generic': 5, 'normal': 6, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
     }
     train_df['attack_cat'] = train_df['attack_cat'].map(label_mapping)
     train_df = train_df.dropna(subset=['attack_cat'])
     train_df['attack_cat'] = train_df['attack_cat'].astype(int)
 
     numeric_cols = [
-        'sport', 'dsport', 'ct_ftp_cmd', 'Ltime', 'Stime', 'sbytes', 'dbytes', 'Spkts',
-        'Dpkts', 'Sload', 'Dload', 'Sjit', 'Djit', 'tcprtt', 'synack', 'ackdat'
+        'sport', 'dsport', 'ct_ftp_cmd', 'Ltime', 'Stime', 'sbytes', 'dbytes',
+        'Spkts', 'Dpkts', 'Sload', 'Dload', 'Sjit', 'Djit',
+        'tcprtt', 'synack', 'ackdat'
     ]
     for col in numeric_cols:
         train_df[col] = pd.to_numeric(train_df[col], errors='coerce')
@@ -104,8 +98,10 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     train_df['tcp_setup_ratio'] = train_df['tcprtt'] / \
         (train_df['synack'] + train_df['ackdat'] + 1)
 
-    columns_to_drop = ['sport', 'dsport', 'proto',
-                       'srcip', 'dstip', 'state', 'service', 'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime']
+    columns_to_drop = [
+        'sport', 'dsport', 'proto', 'srcip', 'dstip', 'state', 'service',
+        'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime'
+    ]
     train_df = train_df.drop(columns=columns_to_drop, errors='ignore')
 
     X = train_df.drop(['attack_cat'], axis=1)
@@ -117,40 +113,35 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     X, y = X[mask], y[mask]
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y)
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
 
-    scaler_dict = {
-        'standard': StandardScaler(),
-        'minmax': MinMaxScaler(),
-        'robust': RobustScaler()
-    }
-    scaler = scaler_dict.get(scaler_choice, StandardScaler())
+    scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
-
     return X_train_scaled, X_test_scaled, y_train, y_test
 
-# MLP Model Definition
 
+class DNNClassifier(nn.Module):
+    def __init__(self, input_dim, num_classes, hidden_dims=[128, 64, 32], dropout=0.01):
+        super(DNNClassifier, self).__init__()
 
-class MLPClassifier(nn.Module):
-    def __init__(self, input_dim, num_classes, hidden_dims=[128, 64], dropout=0.2):
-        super(MLPClassifier, self).__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(input_dim, hidden_dims[0]),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dims[0], hidden_dims[1]),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dims[1], num_classes)
-        )
+        layers = []
+        prev_dim = input_dim
+
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout))
+            prev_dim = hidden_dim
+
+        layers.append(nn.Linear(prev_dim, num_classes))
+        self.layers = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.layers(x)
 
 
-# Training Function
 def train_epoch(model, train_loader, optimizer, criterion, scaler, device):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
@@ -181,8 +172,6 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, device):
     epoch_time = (end_time - start_time) / 60
     train_accuracy = correct / total
     return total_loss / len(train_loader), train_accuracy, epoch_time, all_preds, all_labels
-
-# Validation Function
 
 
 def validate_epoch(model, test_loader, criterion, device):
@@ -259,7 +248,7 @@ def plot_training_evaluation_time(train_times, eval_times):
     ax2.tick_params(axis='y', labelcolor=color)
 
     plt.title("Training and Evaluation Time per Epoch")
-    fig.tight_layout()  # to avoid overlap
+    fig.tight_layout()
     plt.grid(True)
     plt.savefig('DNN_train_evaluation_time.png')
     plt.show()
@@ -310,15 +299,11 @@ def plot_roc_auc(y_true, y_pred, num_classes):
     plt.savefig('DNN_roc_auc.png')
     plt.show()
 
-# Main Execution
-# Main Execution
-# Main Execution
-
 
 def main():
-    root = 'data/'
+    root = "data/"
     batch_size = 512
-    num_epochs = 100
+    num_epochs = 300
     learning_rate = 1e-4
     weight_decay = 1e-5
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -344,8 +329,8 @@ def main():
         test_dataset, batch_size=batch_size, shuffle=False)
 
     input_dim = X_train.shape[1]
-    model = MLPClassifier(input_dim=input_dim, num_classes=num_classes).to(
-        device)  # Thay thế Transformer bằng MLP
+    model = DNNClassifier(input_dim=input_dim, num_classes=num_classes).to(
+        device)
     optimizer = optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -377,7 +362,7 @@ def main():
         print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
               f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
               f"Val Acc: {val_acc:.4f} | "
-              f"Training Time: {train_time:.2f} seconds | Evaluation Time: {eval_time:.2f} seconds")
+              f"Training Time: {train_time:.2f} mins | Evaluation Time: {eval_time:.2f} seconds")
 
     total_time = (time.time() - total_start_time) / 60
     print(f"Total Training Time: {total_time:.2f} minutes")
@@ -389,8 +374,8 @@ def main():
     plot_roc_auc(val_labels, val_preds, num_classes)
 
     print("Classification Report:")
-    print(classification_report(val_labels, val_preds,
-          target_names=[str(c) for c in classes]))
+    print(classification_report(val_labels, val_preds, target_names=[
+        str(c) for c in classes], digits=4))
 
 
 if __name__ == "__main__":

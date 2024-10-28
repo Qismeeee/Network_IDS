@@ -6,7 +6,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
+from sklearn.preprocessing import StandardScaler, label_binarize
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.metrics import (
@@ -22,9 +22,6 @@ from sklearn.metrics import (
 )
 import matplotlib.pyplot as plt
 import time
-from sklearn.preprocessing import LabelEncoder
-from imblearn.over_sampling import RandomOverSampler
-from sklearn.utils.class_weight import compute_class_weight
 
 
 class FocalLoss(nn.Module):
@@ -47,7 +44,7 @@ class FocalLoss(nn.Module):
             return F_loss
 
 
-def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
+def load_and_preprocess_data(root, apply_log_transform=True):
     NB15_1 = pd.read_csv(root + 'UNSW-NB15_1.csv', low_memory=False)
     NB15_2 = pd.read_csv(root + 'UNSW-NB15_2.csv', low_memory=False)
     NB15_3 = pd.read_csv(root + 'UNSW-NB15_3.csv', low_memory=False)
@@ -71,8 +68,8 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
         'backdoors', 'backdoor')
 
     label_mapping = {
-        'normal': 6, 'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
-        'fuzzers': 4, 'generic': 5, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
+        'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
+        'fuzzers': 4, 'generic': 5, 'normal': 6, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
     }
     train_df['attack_cat'] = train_df['attack_cat'].map(label_mapping)
     train_df = train_df.dropna(subset=['attack_cat'])
@@ -115,12 +112,7 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y)
 
-    scaler_dict = {
-        'standard': StandardScaler(),
-        'minmax': MinMaxScaler(),
-        'robust': RobustScaler()
-    }
-    scaler = scaler_dict.get(scaler_choice, StandardScaler())
+    scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
@@ -308,7 +300,7 @@ def plot_roc_auc(y_true, y_pred, num_classes):
 def main():
     root = "data/"
     batch_size = 512
-    num_epochs = 100
+    num_epochs = 300
     learning_rate = 1e-4
     weight_decay = 1e-5
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -380,7 +372,7 @@ def main():
 
     print("Classification Report:")
     print(classification_report(val_labels, val_preds,
-          target_names=[str(c) for c in classes]))
+          target_names=[str(c) for c in classes], digits=4))
 
 
 if __name__ == "__main__":

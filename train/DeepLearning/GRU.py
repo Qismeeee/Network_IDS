@@ -7,8 +7,9 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder, LabelEncoder
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, label_binarize
+from sklearn.preprocessing import StandardScaler, label_binarize
 from sklearn.ensemble import IsolationForest
+from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 from sklearn.metrics import (
     classification_report,
     accuracy_score,
@@ -23,8 +24,6 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import time
 from sklearn.preprocessing import LabelEncoder
-from imblearn.over_sampling import RandomOverSampler
-from sklearn.utils.class_weight import compute_class_weight
 
 
 class FocalLoss(nn.Module):
@@ -47,7 +46,7 @@ class FocalLoss(nn.Module):
             return F_loss
 
 
-def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
+def load_and_preprocess_data(root, apply_log_transform=True):
     NB15_1 = pd.read_csv(root + 'UNSW-NB15_1.csv', low_memory=False)
     NB15_2 = pd.read_csv(root + 'UNSW-NB15_2.csv', low_memory=False)
     NB15_3 = pd.read_csv(root + 'UNSW-NB15_3.csv', low_memory=False)
@@ -71,16 +70,17 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
         'backdoors', 'backdoor')
 
     label_mapping = {
-        'normal': 6, 'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
-        'fuzzers': 4, 'generic': 5, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
+        'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
+        'fuzzers': 4, 'generic': 5, 'normal': 6, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
     }
     train_df['attack_cat'] = train_df['attack_cat'].map(label_mapping)
     train_df = train_df.dropna(subset=['attack_cat'])
     train_df['attack_cat'] = train_df['attack_cat'].astype(int)
 
     numeric_cols = [
-        'sport', 'dsport', 'ct_ftp_cmd', 'Ltime', 'Stime', 'sbytes', 'dbytes', 'Spkts',
-        'Dpkts', 'Sload', 'Dload', 'Sjit', 'Djit', 'tcprtt', 'synack', 'ackdat'
+        'sport', 'dsport', 'ct_ftp_cmd', 'Ltime', 'Stime', 'sbytes', 'dbytes',
+        'Spkts', 'Dpkts', 'Sload', 'Dload', 'Sjit', 'Djit',
+        'tcprtt', 'synack', 'ackdat'
     ]
     for col in numeric_cols:
         train_df[col] = pd.to_numeric(train_df[col], errors='coerce')
@@ -100,8 +100,10 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     train_df['tcp_setup_ratio'] = train_df['tcprtt'] / \
         (train_df['synack'] + train_df['ackdat'] + 1)
 
-    columns_to_drop = ['sport', 'dsport', 'proto',
-                       'srcip', 'dstip', 'state', 'service', 'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime']
+    columns_to_drop = [
+        'sport', 'dsport', 'proto', 'srcip', 'dstip', 'state', 'service',
+        'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime'
+    ]
     train_df = train_df.drop(columns=columns_to_drop, errors='ignore')
 
     X = train_df.drop(['attack_cat'], axis=1)
@@ -113,17 +115,12 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     X, y = X[mask], y[mask]
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y)
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
 
-    scaler_dict = {
-        'standard': StandardScaler(),
-        'minmax': MinMaxScaler(),
-        'robust': RobustScaler()
-    }
-    scaler = scaler_dict.get(scaler_choice, StandardScaler())
+    scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
-
     return X_train_scaled, X_test_scaled, y_train, y_test
 
 
@@ -178,10 +175,14 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, device):
         all_preds.extend(predicted.cpu().numpy())
         all_labels.extend(labels.cpu().numpy())
 
-    end_time = time.time()
-    epoch_time = (end_time - start_time) / 60
-    train_accuracy = correct / total
-    return total_loss / len(train_loader), train_accuracy, epoch_time, all_preds, all_labels
+    epoch_time = (time.time() - start_time) / 60
+    train_accuracy = accuracy_score(all_labels, all_preds)
+    train_precision = precision_score(
+        all_labels, all_preds, average='weighted', zero_division=0)
+    train_recall = recall_score(all_labels, all_preds, average='weighted')
+    train_f1 = f1_score(all_labels, all_preds, average='weighted')
+
+    return total_loss / len(train_loader), train_accuracy, train_precision, train_recall, train_f1, epoch_time, all_preds, all_labels
 
 
 def validate_epoch(model, test_loader, criterion, device):
@@ -204,10 +205,14 @@ def validate_epoch(model, test_loader, criterion, device):
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
-    end_time = time.time()
-    eval_time = end_time - start_time
-    val_accuracy = correct / total
-    return val_loss / len(test_loader), val_accuracy, eval_time, all_preds, all_labels
+    eval_time = time.time() - start_time
+    val_accuracy = accuracy_score(all_labels, all_preds)
+    val_precision = precision_score(
+        all_labels, all_preds, average='weighted', zero_division=0)
+    val_recall = recall_score(all_labels, all_preds, average='weighted')
+    val_f1 = f1_score(all_labels, all_preds, average='weighted')
+
+    return val_loss / len(test_loader), val_accuracy, val_precision, val_recall, val_f1, eval_time, all_preds, all_labels
 
 
 def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losses):
@@ -303,9 +308,9 @@ def plot_roc_auc(y_true, y_pred, num_classes):
 
 
 def main():
-    root = 'data/'
+    root = "data/"
     batch_size = 512
-    num_epochs = 100
+    num_epochs = 300
     learning_rate = 1e-4
     weight_decay = 1e-5
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -341,15 +346,18 @@ def main():
     scaler_fp16 = torch.cuda.amp.GradScaler()
 
     train_accuracies, val_accuracies = [], []
+    train_precisions, val_precisions = [], []
+    train_recalls, val_recalls = [], []
+    train_f1s, val_f1s = [], []
     train_losses, val_losses = [], []
     train_times, eval_times = [], []
     total_start_time = time.time()
 
     for epoch in range(1, num_epochs + 1):
-        train_loss, train_acc, train_time, train_preds, train_labels = train_epoch(
+        train_loss, train_acc, train_precision, train_recall, train_f1, train_time, train_preds, train_labels = train_epoch(
             model, train_loader, optimizer, criterion, scaler_fp16, device)
 
-        val_loss, val_acc, eval_time, val_preds, val_labels = validate_epoch(
+        val_loss, val_acc, val_precision, val_recall, val_f1, eval_time, val_preds, val_labels = validate_epoch(
             model, test_loader, criterion, device)
 
         scheduler.step()
@@ -357,13 +365,24 @@ def main():
         val_accuracies.append(val_acc)
         train_losses.append(train_loss)
         val_losses.append(val_loss)
+        train_precisions.append(train_precision)
+        val_precisions.append(val_precision)
+        train_recalls.append(train_recall)
+        val_recalls.append(val_recall)
+        train_f1s.append(train_f1)
+        val_f1s.append(val_f1)
         train_times.append(train_time)
         eval_times.append(eval_time)
 
         print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
               f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_acc:.4f} | "
-              f"Training Time: {train_time:.2f} seconds | Evaluation Time: {eval_time:.2f} seconds")
+              f"Val Acc: {val_acc:.4f} | Train Precision: {
+                  train_precision:.4f} | "
+              f"Val Precision: {val_precision:.4f} | Train Recall: {
+                  train_recall:.4f} | "
+              f"Val Recall: {
+                  val_recall:.4f} | Train F1-Score: {train_f1:.4f} | "
+              f"Val F1-Score: {val_f1:.4f} | Training Time: {train_time:.2f} seconds | Evaluation Time: {eval_time:.2f} seconds")
 
     total_time = (time.time() - total_start_time) / 60
     print(f"Total Training Time: {total_time:.2f} minutes")
@@ -374,7 +393,7 @@ def main():
     plot_confusion_matrix(val_labels, val_preds, classes)
     plot_roc_auc(val_labels, val_preds, num_classes)
 
-    print("Classification Report:")
+    print("Final Classification Report:")
     print(classification_report(val_labels, val_preds,
           target_names=[str(c) for c in classes]))
 

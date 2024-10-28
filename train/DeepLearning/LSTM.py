@@ -1,38 +1,50 @@
-import numpy as np
 import pandas as pd
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, label_binarize
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc, ConfusionMatrixDisplay
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import (
+    classification_report,
+    accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    confusion_matrix,
+    ConfusionMatrixDisplay,
+    roc_curve,
+    auc
+)
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
-from matplotlib.backends.backend_pdf import PdfPages
 import time
 
 
-class FocalLoss(tf.keras.losses.Loss):
-    def __init__(self, alpha=1.0, gamma=2.0, from_logits=False, reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE, name='focal_loss'):
-        super(FocalLoss, self).__init__(reduction=reduction, name=name)
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=1, gamma=2, reduction='mean'):
+        super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
-        self.from_logits = from_logits
+        self.reduction = reduction
 
-    def call(self, y_true, y_pred):
-        if self.from_logits:
-            y_pred = tf.nn.softmax(y_pred)
-        y_pred = tf.clip_by_value(
-            y_pred, tf.keras.backend.epsilon(), 1. - tf.keras.backend.epsilon())
-        cross_entropy_loss = -y_true * tf.math.log(y_pred)
-        focal_loss = self.alpha * \
-            tf.pow(1 - y_pred, self.gamma) * cross_entropy_loss
-        return tf.reduce_sum(focal_loss, axis=1)
+    def forward(self, inputs, targets):
+        BCE_loss = nn.CrossEntropyLoss(reduction='none')(inputs, targets)
+        pt = torch.exp(-BCE_loss)
+        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
+
+        if self.reduction == 'mean':
+            return torch.mean(F_loss)
+        elif self.reduction == 'sum':
+            return torch.sum(F_loss)
+        else:
+            return F_loss
 
 
-def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
+def load_and_preprocess_data(root, apply_log_transform=True):
     NB15_1 = pd.read_csv(root + 'UNSW-NB15_1.csv', low_memory=False)
     NB15_2 = pd.read_csv(root + 'UNSW-NB15_2.csv', low_memory=False)
     NB15_3 = pd.read_csv(root + 'UNSW-NB15_3.csv', low_memory=False)
@@ -56,16 +68,17 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
         'backdoors', 'backdoor')
 
     label_mapping = {
-        'normal': 6, 'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
-        'fuzzers': 4, 'generic': 5, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
+        'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
+        'fuzzers': 4, 'generic': 5, 'normal': 6, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
     }
     train_df['attack_cat'] = train_df['attack_cat'].map(label_mapping)
     train_df = train_df.dropna(subset=['attack_cat'])
     train_df['attack_cat'] = train_df['attack_cat'].astype(int)
 
     numeric_cols = [
-        'sport', 'dsport', 'ct_ftp_cmd', 'Ltime', 'Stime', 'sbytes', 'dbytes', 'Spkts',
-        'Dpkts', 'Sload', 'Dload', 'Sjit', 'Djit', 'tcprtt', 'synack', 'ackdat'
+        'sport', 'dsport', 'ct_ftp_cmd', 'Ltime', 'Stime', 'sbytes', 'dbytes',
+        'Spkts', 'Dpkts', 'Sload', 'Dload', 'Sjit', 'Djit',
+        'tcprtt', 'synack', 'ackdat'
     ]
     for col in numeric_cols:
         train_df[col] = pd.to_numeric(train_df[col], errors='coerce')
@@ -85,8 +98,10 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     train_df['tcp_setup_ratio'] = train_df['tcprtt'] / \
         (train_df['synack'] + train_df['ackdat'] + 1)
 
-    columns_to_drop = ['sport', 'dsport', 'proto',
-                       'srcip', 'dstip', 'state', 'service', 'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime']
+    columns_to_drop = [
+        'sport', 'dsport', 'proto', 'srcip', 'dstip', 'state', 'service',
+        'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime'
+    ]
     train_df = train_df.drop(columns=columns_to_drop, errors='ignore')
 
     X = train_df.drop(['attack_cat'], axis=1)
@@ -98,99 +113,266 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     X, y = X[mask], y[mask]
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y)
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
 
-    scaler_dict = {
-        'standard': StandardScaler(),
-        'minmax': MinMaxScaler(),
-        'robust': RobustScaler()
-    }
-    scaler = scaler_dict.get(scaler_choice, StandardScaler())
+    scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
+    return X_train_scaled, X_test_scaled, y_train, y_test
 
-    return X_train_scaled, X_test_scaled, y_train, y_test, label_mapping
+
+class LSTMClassifier(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers, num_classes, dropout=0.5):
+        super(LSTMClassifier, self).__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout,
+            bidirectional=True
+        )
+        self.fc = nn.Linear(hidden_dim * 2, num_classes)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = x.unsqueeze(1)
+        h_lstm, _ = self.lstm(x)
+        h_lstm = h_lstm[:, -1, :]
+        h_lstm = self.dropout(h_lstm)
+        logits = self.fc(h_lstm)
+        return logits
 
 
-root = "data/"  
-X_train_scaled, X_test_scaled, y_train_resampled, y_test, label_mapping = load_and_preprocess_data(
-    root)
+def train_epoch(model, train_loader, optimizer, criterion, device):
+    model.train()
+    total_loss, correct, total = 0.0, 0, 0
+    start_time = time.time()
 
-X_train_reshaped = np.reshape(
-    X_train_scaled, (X_train_scaled.shape[0], 1, X_train_scaled.shape[1]))
-X_test_reshaped = np.reshape(
-    X_test_scaled, (X_test_scaled.shape[0], 1, X_test_scaled.shape[1]))
+    for inputs, labels in train_loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+        optimizer.zero_grad()
 
-num_classes = len(np.unique(y_train_resampled))
-y_train_categorical = tf.keras.utils.to_categorical(
-    y_train_resampled, num_classes=num_classes)
-y_test_categorical = tf.keras.utils.to_categorical(
-    y_test, num_classes=num_classes)
+        logits = model(inputs)
+        loss = criterion(logits, labels)
 
-model = Sequential()
-model.add(LSTM(units=50, activation='relu', input_shape=(
-    X_train_reshaped.shape[1], X_train_reshaped.shape[2])))
-model.add(Dense(num_classes, activation='softmax'))
-model.compile(optimizer='adam', loss=FocalLoss(
-    from_logits=False), metrics=['accuracy'])
+        loss.backward()
+        optimizer.step()
 
-start_time = time.time()
-history = model.fit(X_train_reshaped, y_train_categorical, epochs=100,
-                    batch_size=128, validation_data=(X_test_reshaped, y_test_categorical))
+        total_loss += loss.item()
+        _, predicted = torch.max(logits, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
 
-training_time = time.time() - start_time
-print(f"Training time: {training_time:.2f} seconds")
+    end_time = time.time()
+    epoch_time = (end_time - start_time) / 60
+    train_accuracy = correct / total
+    return total_loss / len(train_loader), train_accuracy, epoch_time
 
-pdf_path = "training_plots.pdf"
-with PdfPages(pdf_path) as pdf:
-    # Plot accuracy
-    plt.figure()
-    plt.plot(history.history['accuracy'], label='Train Accuracy')
-    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
-    plt.title('Model Accuracy')
-    plt.xlabel('Epoch')
+
+def validate_epoch(model, test_loader, criterion, device):
+    model.eval()
+    val_loss, correct, total = 0.0, 0, 0
+    all_preds, all_labels = [], []
+    start_time = time.time()
+
+    with torch.no_grad():
+        for inputs, labels in test_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            logits = model(inputs)
+            loss = criterion(logits, labels)
+
+            val_loss += loss.item()
+            _, predicted = torch.max(logits, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    end_time = time.time()
+    eval_time = end_time - start_time
+    val_accuracy = correct / total
+
+    precision = precision_score(
+        all_labels, all_preds, average='weighted', zero_division=1)
+    recall = recall_score(all_labels, all_preds,
+                          average='weighted', zero_division=1)
+    f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=1)
+
+    return val_loss / len(test_loader), val_accuracy, eval_time, all_preds, all_labels, precision, recall, f1
+
+
+def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losses):
+    epochs = np.arange(1, len(train_accuracies) + 1)
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(epochs, train_accuracies, label='Training Accuracy', color='blue')
+    plt.plot(epochs, val_accuracies,
+             label='Validation Accuracy', color='orange')
+    plt.xlabel('Epochs')
     plt.ylabel('Accuracy')
+    plt.title('Training and Validation Accuracy')
     plt.legend()
-    pdf.savefig()  # saves the current figure into a pdf page
-    plt.close()
+    plt.grid(True)
+    plt.savefig('lstm_accuracy.png')
+    plt.show()
 
-    # Plot loss
-    plt.figure()
-    plt.plot(history.history['loss'], label='Train Loss')
-    plt.plot(history.history['val_loss'], label='Validation Loss')
-    plt.title('Model Loss')
-    plt.xlabel('Epoch')
+    plt.figure(figsize=(8, 6))
+    plt.plot(epochs, train_losses, label='Training Loss', color='blue')
+    plt.plot(epochs, val_losses, label='Validation Loss', color='orange')
+    plt.xlabel('Epochs')
     plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
     plt.legend()
-    pdf.savefig()  
-    plt.close()
+    plt.grid(True)
+    plt.savefig('lstm_loss.png')
+    plt.show()
 
-    y_pred = model.predict(X_test_reshaped)
-    y_pred_classes = np.argmax(y_pred, axis=1)
-    print("Classification Report:")
-    print(classification_report(y_test, y_pred_classes,
-          target_names=[str(i) for i in range(num_classes)]))
 
-    conf_matrix = confusion_matrix(y_test, y_pred_classes)
-    disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=[
-                                  str(i) for i in range(num_classes)])
-    disp.plot()
-    plt.title("Confusion Matrix")
-    pdf.savefig() 
-    plt.close()
+def plot_training_evaluation_time(train_times, eval_times):
+    epochs = np.arange(1, len(train_times) + 1)
+    fig, ax1 = plt.subplots(figsize=(8, 6))
 
-    plt.figure(figsize=(10, 10))
+    color = 'tab:blue'
+    ax1.set_xlabel('Epochs')
+    ax1.set_ylabel('Training Time (minutes)', color=color)
+    ax1.plot(epochs, train_times, label='Training Time', color=color)
+    ax1.tick_params(axis='y', labelcolor=color)
+
+    ax2 = ax1.twinx()
+    color = 'tab:red'
+    ax2.set_ylabel('Evaluation Time (seconds)', color=color)
+    ax2.plot(epochs, eval_times, label='Evaluation Time', color=color)
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    plt.title("Training and Evaluation Time per Epoch")
+    fig.tight_layout()
+    plt.grid(True)
+    plt.savefig('lstm_train_evaluation_time.png')
+    plt.show()
+
+
+def plot_confusion_matrix(y_true, y_pred, classes):
+    cm = confusion_matrix(y_true, y_pred)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
+    plt.figure(figsize=(10, 8))
+    disp.plot(cmap=plt.cm.Blues, values_format='d')
+    plt.title('Confusion Matrix')
+    plt.grid(False)
+    plt.savefig('lstm_confusion_matrix.png')
+    plt.show()
+
+
+def plot_roc_auc(y_true, y_pred, num_classes):
+    y_true_bin = label_binarize(y_true, classes=np.arange(num_classes))
+    y_pred_bin = label_binarize(y_pred, classes=np.arange(num_classes))
+
+    fpr_micro, tpr_micro, _ = roc_curve(y_true_bin.ravel(), y_pred_bin.ravel())
+    roc_auc_micro = auc(fpr_micro, tpr_micro)
+
+    fpr = dict()
+    tpr = dict()
+    roc_auc = dict()
     for i in range(num_classes):
-        fpr, tpr, _ = roc_curve(y_test_categorical[:, i], y_pred[:, i])
-        roc_auc = auc(fpr, tpr)
-        plt.plot(fpr, tpr, label=f'Class {i} (AUC = {roc_auc:.2f})')
+        fpr[i], tpr[i], _ = roc_curve(y_true_bin[:, i], y_pred_bin[:, i])
+        roc_auc[i] = auc(fpr[i], tpr[i])
 
-    plt.plot([0, 1], [0, 1], 'k--', label='Random')
-    plt.title('AUC-ROC Curves')
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr_micro, tpr_micro, color='blue',
+             label=f'Micro-AUC = {roc_auc_micro:.4f}')
+    for i in range(num_classes):
+        plt.plot(fpr[i], tpr[i], label=f'Class {i} AUC = {roc_auc[i]:.4f}')
+    plt.plot([0, 1], [0, 1], linestyle='--', color='grey')
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
-    plt.legend()
-    pdf.savefig() 
-    plt.close()
+    plt.title('ROC-AUC Curves')
+    plt.legend(loc='best')
+    plt.grid(True)
+    plt.savefig('lstm_roc_auc.png')
+    plt.show()
 
-print(f"All plots saved to {pdf_path}.")
+
+def main():
+    root = "data/"
+    batch_size = 512
+    num_epochs = 300
+    learning_rate = 1e-3
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    X_train, X_test, y_train, y_test = load_and_preprocess_data(root)
+
+    classes = sorted(np.unique(y_train))
+    num_classes = len(classes)
+    label_encoder = LabelEncoder()
+    y_train_enc = label_encoder.fit_transform(y_train)
+    y_test_enc = label_encoder.transform(y_test)
+
+    X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
+    y_train_tensor = torch.tensor(y_train_enc, dtype=torch.long)
+    X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
+    y_test_tensor = torch.tensor(y_test_enc, dtype=torch.long)
+
+    train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+    test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False)
+
+    input_dim = X_train.shape[1]
+    model = LSTMClassifier(
+        input_dim=input_dim,
+        hidden_dim=128,
+        num_layers=2,
+        num_classes=num_classes,
+        dropout=0.5
+    ).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = FocalLoss(alpha=1, gamma=2)
+
+    train_accuracies, val_accuracies = [], []
+    train_losses, val_losses = [], []
+    train_times, eval_times = [], []
+
+    total_start_time = time.time()
+
+    for epoch in range(1, num_epochs + 1):
+        train_loss, train_acc, train_time, train_preds, train_labels = train_epoch(
+            model, train_loader, optimizer, criterion, device
+        )
+
+        val_loss, val_acc, eval_time, val_preds, val_labels = validate_epoch(
+            model, test_loader, criterion, device
+        )
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        train_accuracies.append(train_acc)
+        val_accuracies.append(val_acc)
+        train_times.append(train_time)
+        eval_times.append(eval_time)
+
+        print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
+              f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
+              f"Val Acc: {val_acc:.4f} | Training Time: {
+                  train_time:.2f} mins | "
+              f"Evaluation Time: {eval_time:.2f} secs")
+
+    total_time = (time.time() - total_start_time) / 60
+    print(f"Total Training Time: {total_time:.2f} minutes")
+
+    plot_accuracy_loss(train_accuracies, val_accuracies,
+                       train_losses, val_losses)
+    plot_training_evaluation_time(train_times, eval_times)
+    plot_confusion_matrix(val_labels, val_preds, classes)
+    plot_roc_auc(val_labels, val_preds, num_classes)
+
+    print("Classification Report:")
+    print(classification_report(val_labels, val_preds,
+          target_names=[str(c) for c in classes]))
+
+
+if __name__ == "__main__":
+    main()
