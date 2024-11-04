@@ -123,7 +123,7 @@ def load_and_preprocess_data(root, apply_log_transform=True):
 
 
 class LSTMClassifier(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers, num_classes, dropout=0.5):
+    def __init__(self, input_dim, hidden_dim, num_layers, num_classes, dropout=0.1):
         super(LSTMClassifier, self).__init__()
         self.lstm = nn.LSTM(
             input_size=input_dim,
@@ -131,7 +131,6 @@ class LSTMClassifier(nn.Module):
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout,
-            bidirectional=True
         )
         self.fc = nn.Linear(hidden_dim * 2, num_classes)
         self.dropout = nn.Dropout(dropout)
@@ -356,8 +355,8 @@ def main():
 
         print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
               f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_acc:.4f} | Training Time: {
-                  train_time:.2f} mins | "
+              f"Val Acc: {val_acc: .4f} | Training Time: {
+                  train_time: .2f} mins | "
               f"Evaluation Time: {eval_time:.2f} secs")
 
     total_time = (time.time() - total_start_time) / 60

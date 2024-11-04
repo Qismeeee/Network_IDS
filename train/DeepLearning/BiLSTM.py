@@ -124,7 +124,7 @@ def load_and_preprocess_data(root, apply_log_transform=True):
 
 
 class BiLSTMClassifier(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers, num_classes, dropout=0.5):
+    def __init__(self, input_dim, hidden_dim, num_layers, num_classes, dropout=0.1):
         super(BiLSTMClassifier, self).__init__()
         self.bilstm = nn.LSTM(
             input_size=input_dim,
@@ -357,8 +357,8 @@ def main():
 
         print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
               f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_acc:.4f} | Precision: {
-                  precision:.4f} | Recall: {recall:.4f} | "
+              f"Val Acc: {val_acc: .4f} | Precision: {
+                  precision: .4f} | Recall: {recall: .4f} | "
               f"F1-score: {f1:.4f} | Training Time: {train_time:.2f} mins | "
               f"Evaluation Time: {eval_time:.2f} secs")
 
