@@ -128,17 +128,19 @@ class CNNClassifier(nn.Module):
         self.layer1 = nn.Sequential(
             nn.Conv1d(1, 32, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.BatchNorm1d(32)
+            nn.BatchNorm1d(32),
+            nn.MaxPool1d(kernel_size=2)
         )
         self.layer2 = nn.Sequential(
             nn.Conv1d(32, 64, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.BatchNorm1d(64)
+            nn.BatchNorm1d(64),
+            nn.MaxPool1d(kernel_size=2)
         )
         self.fc = nn.Sequential(
-            nn.Linear(64 * input_dim, 128),
+            nn.Linear(64 * (input_dim // 4), 128),
             nn.ReLU(),
-            nn.Dropout(0.5),
+            nn.Dropout(0.3),
             nn.Linear(128, num_classes)
         )
 
@@ -295,7 +297,7 @@ def main():
     root = "data/"
     batch_size = 512
     num_epochs = 300
-    learning_rate = 1e-3
+    learning_rate = 1e-4
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     X_train_scaled, X_test_scaled, y_train, y_test = load_and_preprocess_data(
@@ -322,23 +324,21 @@ def main():
     input_dim = X_train_scaled.shape[1]
     model = CNNClassifier(input_dim=input_dim,
                           num_classes=num_classes).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = FocalLoss(alpha=1, gamma=2)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+    criterion = nn.CrossEntropyLoss()
 
     train_accuracies, val_accuracies = [], []
     train_losses, val_losses = [], []
     train_times, eval_times = [], []
+    val_labels, val_preds = [], []
 
     total_start_time = time.time()
 
     for epoch in range(1, num_epochs + 1):
         train_loss, train_acc, train_time, train_preds, train_labels = train_epoch(
-            model, train_loader, optimizer, criterion, device
-        )
-
-        val_loss, val_acc, eval_time, val_preds, val_labels = validate_epoch(
-            model, test_loader, criterion, device
-        )
+            model, train_loader, optimizer, criterion, device)
+        val_loss, val_acc, eval_time, val_preds_epoch, val_labels_epoch = validate_epoch(
+            model, test_loader, criterion, device)
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
@@ -346,11 +346,12 @@ def main():
         val_accuracies.append(val_acc)
         train_times.append(train_time)
         eval_times.append(eval_time)
+        val_labels.extend(val_labels_epoch)
+        val_preds.extend(val_preds_epoch)
 
         print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
               f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_acc:.4f} | Training Time: {
-                  train_time:.2f} mins | "
+              f"Val Acc: {val_acc:.4f} | Training Time: {train_time:.2f} mins | "
               f"Evaluation Time: {eval_time:.2f} secs")
 
     total_time = (time.time() - total_start_time) / 60

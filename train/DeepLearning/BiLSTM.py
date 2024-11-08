@@ -124,7 +124,7 @@ def load_and_preprocess_data(root, apply_log_transform=True):
 
 
 class BiLSTMClassifier(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers, num_classes, dropout=0.1):
+    def __init__(self, input_dim, hidden_dim, num_layers, num_classes, dropout=0.2):
         super(BiLSTMClassifier, self).__init__()
         self.bilstm = nn.LSTM(
             input_size=input_dim,
@@ -328,7 +328,7 @@ def main():
         hidden_dim=128,
         num_layers=2,
         num_classes=num_classes,
-        dropout=0.5
+        dropout=0.2
     ).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = FocalLoss(alpha=1, gamma=2)

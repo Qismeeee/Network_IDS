@@ -123,16 +123,20 @@ def load_and_preprocess_data(root, apply_log_transform=True):
 
 
 class LSTMClassifier(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers, num_classes, dropout=0.1):
+    def __init__(self, input_dim, hidden_dim, num_layers, num_classes, dropout=0.2, bidirectional=False):
         super(LSTMClassifier, self).__init__()
+        self.bidirectional = bidirectional
         self.lstm = nn.LSTM(
             input_size=input_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout,
+            bidirectional=bidirectional
         )
-        self.fc = nn.Linear(hidden_dim * 2, num_classes)
+
+        fc_input_dim = hidden_dim * 2 if bidirectional else hidden_dim
+        self.fc = nn.Linear(fc_input_dim, num_classes)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -147,6 +151,7 @@ class LSTMClassifier(nn.Module):
 def train_epoch(model, train_loader, optimizer, criterion, device):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
+    train_preds, train_labels = [], []
     start_time = time.time()
 
     for inputs, labels in train_loader:
@@ -164,10 +169,16 @@ def train_epoch(model, train_loader, optimizer, criterion, device):
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
 
+        # Collect predictions and labels
+        train_preds.extend(predicted.cpu().numpy())
+        train_labels.extend(labels.cpu().numpy())
+
     end_time = time.time()
     epoch_time = (end_time - start_time) / 60
     train_accuracy = correct / total
-    return total_loss / len(train_loader), train_accuracy, epoch_time
+
+    # Return five values
+    return total_loss / len(train_loader), train_accuracy, epoch_time, train_preds, train_labels
 
 
 def validate_epoch(model, test_loader, criterion, device):
@@ -187,6 +198,7 @@ def validate_epoch(model, test_loader, criterion, device):
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
+            # Collect predictions and labels
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
 
@@ -194,13 +206,8 @@ def validate_epoch(model, test_loader, criterion, device):
     eval_time = end_time - start_time
     val_accuracy = correct / total
 
-    precision = precision_score(
-        all_labels, all_preds, average='weighted', zero_division=1)
-    recall = recall_score(all_labels, all_preds,
-                          average='weighted', zero_division=1)
-    f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=1)
-
-    return val_loss / len(test_loader), val_accuracy, eval_time, all_preds, all_labels, precision, recall, f1
+    # Return five values: val_loss, val_accuracy, eval_time, all_preds, and all_labels
+    return val_loss / len(test_loader), val_accuracy, eval_time, all_preds, all_labels
 
 
 def plot_accuracy_loss(train_accuracies, val_accuracies, train_losses, val_losses):
@@ -297,7 +304,7 @@ def main():
     root = "data/"
     batch_size = 512
     num_epochs = 300
-    learning_rate = 1e-3
+    learning_rate = 1e-4
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     X_train, X_test, y_train, y_test = load_and_preprocess_data(root)
@@ -326,7 +333,7 @@ def main():
         hidden_dim=128,
         num_layers=2,
         num_classes=num_classes,
-        dropout=0.5
+        dropout=0.2
     ).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = FocalLoss(alpha=1, gamma=2)
@@ -355,8 +362,7 @@ def main():
 
         print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
               f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_acc: .4f} | Training Time: {
-                  train_time: .2f} mins | "
+              f"Val Acc: {val_acc: .4f} | Training Time: {train_time: .2f} mins | "
               f"Evaluation Time: {eval_time:.2f} secs")
 
     total_time = (time.time() - total_start_time) / 60
