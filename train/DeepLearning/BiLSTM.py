@@ -385,7 +385,7 @@ def main():
 
     print("Classification Report:")
     print(classification_report(val_labels, val_preds,
-          target_names=[str(c) for c in classes]))
+          target_names=[str(c) for c in classes], digits=4))
 
 
 if __name__ == "__main__":

@@ -351,7 +351,8 @@ def main():
 
         print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
               f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_acc:.4f} | Training Time: {train_time:.2f} mins | "
+              f"Val Acc: {val_acc:.4f} | Training Time: {
+                  train_time:.2f} mins | "
               f"Evaluation Time: {eval_time:.2f} secs")
 
     total_time = (time.time() - total_start_time) / 60
@@ -365,7 +366,7 @@ def main():
 
     print("Classification Report:")
     print(classification_report(val_labels, val_preds,
-          target_names=[str(c) for c in classes]))
+          target_names=[str(c) for c in classes], digits=4))
 
 
 if __name__ == "__main__":
