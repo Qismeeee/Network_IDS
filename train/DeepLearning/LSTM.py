@@ -362,7 +362,8 @@ def main():
 
         print(f"Epoch {epoch}/{num_epochs} | Train Loss: {train_loss:.4f} | "
               f"Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f} | "
-              f"Val Acc: {val_acc: .4f} | Training Time: {train_time: .2f} mins | "
+              f"Val Acc: {val_acc: .4f} | Training Time: {
+                  train_time: .2f} mins | "
               f"Evaluation Time: {eval_time:.2f} secs")
 
     total_time = (time.time() - total_start_time) / 60
