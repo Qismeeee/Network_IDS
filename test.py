@@ -1,25 +1,31 @@
-import numpy as np
+from sklearn.ensemble import RandomForestClassifier
 import pandas as pd
-import os
-import seaborn as sns
-import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
+from sklearn.preprocessing import StandardScaler, label_binarize
 from sklearn.ensemble import IsolationForest
-import math
-# Save plot function
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import (
+    classification_report,
+    accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    confusion_matrix,
+    ConfusionMatrixDisplay,
+    roc_curve,
+    auc
+)
+import matplotlib.pyplot as plt
+import time
 
 
-def save_plot(fig, filename, save_dir='plots', dpi=300):
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-    fig.savefig(os.path.join(save_dir, filename), dpi=dpi, bbox_inches='tight')
-
-# Load and preprocess data
-
-
-def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform=True):
+def load_and_preprocess_data(root, apply_log_transform=True, sample_frac=0.1):
     NB15_1 = pd.read_csv(root + 'UNSW-NB15_1.csv', low_memory=False)
     NB15_2 = pd.read_csv(root + 'UNSW-NB15_2.csv', low_memory=False)
     NB15_3 = pd.read_csv(root + 'UNSW-NB15_3.csv', low_memory=False)
@@ -43,16 +49,17 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
         'backdoors', 'backdoor')
 
     label_mapping = {
-        'normal': 6, 'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
-        'fuzzers': 4, 'generic': 5, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
+        'analysis': 0, 'backdoor': 1, 'dos': 2, 'exploits': 3,
+        'fuzzers': 4, 'generic': 5, 'normal': 6, 'reconnaissance': 7, 'shellcode': 8, 'worms': 9
     }
     train_df['attack_cat'] = train_df['attack_cat'].map(label_mapping)
     train_df = train_df.dropna(subset=['attack_cat'])
     train_df['attack_cat'] = train_df['attack_cat'].astype(int)
 
     numeric_cols = [
-        'sport', 'dsport', 'ct_ftp_cmd', 'Ltime', 'Stime', 'sbytes', 'dbytes', 'Spkts',
-        'Dpkts', 'Sload', 'Dload', 'Sjit', 'Djit', 'tcprtt', 'synack', 'ackdat'
+        'sport', 'dsport', 'ct_ftp_cmd', 'Ltime', 'Stime', 'sbytes', 'dbytes',
+        'Spkts', 'Dpkts', 'Sload', 'Dload', 'Sjit', 'Djit',
+        'tcprtt', 'synack', 'ackdat'
     ]
     for col in numeric_cols:
         train_df[col] = pd.to_numeric(train_df[col], errors='coerce')
@@ -72,79 +79,113 @@ def load_and_preprocess_data(root, scaler_choice='standard', apply_log_transform
     train_df['tcp_setup_ratio'] = train_df['tcprtt'] / \
         (train_df['synack'] + train_df['ackdat'] + 1)
 
-    columns_to_drop = ['sport', 'dsport', 'proto',
-                       'srcip', 'dstip', 'state', 'service']
+    columns_to_drop = [
+        'sport', 'dsport', 'proto', 'srcip', 'dstip', 'state', 'service',
+        'swim', 'dwim', 'stcpb', 'dtcpb', 'Stime', 'Ltime'
+    ]
     train_df = train_df.drop(columns=columns_to_drop, errors='ignore')
 
     X = train_df.drop(['attack_cat'], axis=1)
     y = train_df['attack_cat']
 
-    return train_df, X, y
+    iso = IsolationForest(contamination=0.01, random_state=42)
+    y_pred_outliers = iso.fit_predict(X)
+    mask = y_pred_outliers != -1
+    X, y = X[mask], y[mask]
 
-# Plot skewness distribution
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    return X_train_scaled, X_test_scaled, y_train, y_test
 
 
-def plot_skewness(train_df, save_path='skewness_distribution.png'):
-    numeric_columns = train_df.select_dtypes(
-        include=['float64', 'int64']).columns.tolist()
-    num_columns = len(numeric_columns)
-    num_cols = 3
-    num_rows = math.ceil(num_columns / num_cols)
+# Plot Functions
 
-    plt.figure(figsize=(18, num_rows * 3))
-    sns.set_palette("husl")
-    sns.set(style="whitegrid")
-
-    for i, col in enumerate(numeric_columns, 1):
-        plt.subplot(num_rows, num_cols, i)
-        sns.histplot(train_df[col], kde=True, color='purple')
-        skewness = train_df[col].skew()
-        plt.title(f'{col} (Skewness: {skewness:.2f})')
-        plt.xlabel("Value")
-
-    plt.suptitle("Skewness Distribution of Key Numerical Features",
-                 y=1.02, fontsize=16)
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    save_plot(plt.gcf(), save_path)
+def plot_confusion_matrix(y_true, y_pred, classes):
+    cm = confusion_matrix(y_true, y_pred)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
+    plt.figure(figsize=(10, 8))
+    disp.plot(cmap=plt.cm.Blues, values_format='d')
+    plt.title('Confusion Matrix')
+    plt.grid(False)
+    plt.savefig('rf_confusion_matrix.png')
     plt.show()
 
-# Plot outliers using boxplots
 
+def plot_accuracy_loss(train_accuracies, test_accuracies, train_losses, test_losses):
+    epochs = range(1, len(train_accuracies) + 1)
 
-def plot_outliers(train_df, save_path='outliers_boxplots.png'):
-    numeric_columns = train_df.select_dtypes(
-        include=['float64', 'int64']).columns.tolist()
-    num_columns = len(numeric_columns)
-    num_cols = 3
-    num_rows = math.ceil(num_columns / num_cols)
-
-    plt.figure(figsize=(18, num_rows * 3))
-    sns.set_palette("husl")
-    sns.set(style="whitegrid")
-
-    for i, col in enumerate(numeric_columns, 1):
-        plt.subplot(num_rows, num_cols, i)
-        sns.boxplot(x=train_df[col], color='skyblue')
-        plt.title(f'Outliers in {col}')
-
-    plt.suptitle("Boxplots Showing Outliers in Numerical Features",
-                 y=1.02, fontsize=16)
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    save_plot(plt.gcf(), save_path)
+    plt.figure(figsize=(8, 6))
+    plt.plot(epochs, train_accuracies, label='Training Accuracy', color='blue')
+    plt.plot(epochs, test_accuracies,
+             label='Validation Accuracy', color='orange')
+    plt.xlabel('Number of Trees')
+    plt.ylabel('Accuracy')
+    plt.title('Training and Validation Accuracy')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig('rf_accuracy.png')
     plt.show()
 
-# Main function
+    plt.figure(figsize=(8, 6))
+    plt.plot(epochs, train_losses, label='Training Loss', color='blue')
+    plt.plot(epochs, test_losses, label='Validation Loss', color='orange')
+    plt.xlabel('Number of Trees')
+    plt.ylabel('Loss (1 - Accuracy)')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig('rf_loss.png')
+    plt.show()
+
+# Main Function
 
 
 def main():
-    root = 'data/'
-    train_df, X, y = load_and_preprocess_data(root)
+    root = "data/"
+    X_train, X_test, y_train, y_test = load_and_preprocess_data(
+        root, sample_frac=0.1)
 
-    # Plot skewness
-    plot_skewness(train_df, save_path='skewness_distribution.png')
+    num_trees = 50
+    tree_step = 5  
+    train_accuracies, test_accuracies = [], []
+    train_losses, test_losses = [], []
+    for n_estimators in range(tree_step, num_trees + 1, tree_step):
+        rf_model = RandomForestClassifier(
+            n_estimators=n_estimators, n_jobs=-1, random_state=42)
+        rf_model.fit(X_train, y_train)
 
-    # Plot outliers
-    plot_outliers(train_df, save_path='outliers_boxplots.png')
+        y_train_pred = rf_model.predict(X_train)
+        y_test_pred = rf_model.predict(X_test)
+
+        train_acc = accuracy_score(y_train, y_train_pred)
+        test_acc = accuracy_score(y_test, y_test_pred)
+
+        train_accuracies.append(train_acc)
+        test_accuracies.append(test_acc)
+
+        train_losses.append(1 - train_acc)
+        test_losses.append(1 - test_acc)
+
+    # Final model evaluation
+    rf_model = RandomForestClassifier(
+        n_estimators=num_trees, n_jobs=-1, random_state=42)
+    rf_model.fit(X_train, y_train)
+
+    y_train_pred = rf_model.predict(X_train)
+    y_test_pred = rf_model.predict(X_test)
+
+    print("Final Classification Report:")
+    print(classification_report(y_test, y_test_pred, digits=4))
+
+    classes = sorted(np.unique(y_train))
+    plot_confusion_matrix(y_test, y_test_pred, classes)
+    plot_accuracy_loss(train_accuracies, test_accuracies,
+                       train_losses, test_losses)
 
 
 if __name__ == "__main__":
